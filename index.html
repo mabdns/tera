@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="id">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+  <meta name="theme-color" content="#047857" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TERA - Proofreading Buku Akta Nikah & Validasi Spreadsheet KUA</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800;900&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+
+<body>
+  <!-- Background mesh effect -->
+  <div class="bg-mesh-glow"></div>
+
+  <div id="app">
+    <!-- App Header -->
+    <header class="app-header">
+      <div class="header-container">
+        <div class="logo-brand">
+          <div class="logo-icon-wrap">
+            <i data-lucide="book-check" style="width: 24px; height: 24px;"></i>
+          </div>
+          <div class="brand-text-col">
+            <h1>TERA</h1>
+            <div class="brand-sub">Tinjau Elektronik Dokumen Akta</div>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <!-- Realtime Auto-Save Status Badge -->
+          <div class="autosave-badge" id="autosave-badge" title="Penyimpanan otomatis aktif (IndexedDB lokal)">
+            <i data-lucide="cloud" id="autosave-icon" style="width: 14px; height: 14px;"></i>
+            <span id="autosave-text">Tersimpan Otomatis</span>
+          </div>
+
+
+          <button class="btn btn-secondary" id="btn-open-upload" title="Unggah file Excel dan/atau Foto Scan Buku">
+            <i data-lucide="upload" style="width: 16px; height: 16px;"></i>
+            <span>Unggah Data / Scan</span>
+          </button>
+
+          <button class="btn btn-outline-gold" id="btn-open-ba"
+            title="Lihat & Cetak Berita Acara Rekapitulasi Kesalahan">
+            <i data-lucide="file-text" style="width: 16px; height: 16px;"></i>
+            <span>Berita Acara Koreksi</span>
+          </button>
+
+          <button class="btn" id="btn-smart-autofix"
+            style="background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: #ffffff; font-weight: 700; border: none; box-shadow: 0 3px 12px rgba(16, 185, 129, 0.35);"
+            title="Perbaiki & Selaraskan Otomatis Seluruh Nomor Akta, Tanggal Akad, & Bersihkan Nama (Instan 1 Detik)">
+            <i data-lucide="wand-2" style="width: 16px; height: 16px;"></i>
+            <span>Perbaiki Otomatis</span>
+          </button>
+
+          <button class="btn btn-primary" id="btn-export-template-arsip"
+            title="Ekspor langsung ke Template Inventaris Arsip Vital (Sesuai Format PW.01)">
+            <i data-lucide="download" style="width: 16px; height: 16px;"></i>
+            <span>Ekspor Excel Template Arsip</span>
+          </button>
+
+          <button class="btn btn-secondary btn-icon" id="btn-reset-session"
+            title="Mulai Sesi Baru / Bersihkan Draf Penyimpanan">
+            <i data-lucide="rotate-ccw" style="width: 16px; height: 16px;"></i>
+          </button>
+
+          <button class="btn btn-icon" id="btn-toggle-theme" title="Ubah Tema Gelap/Terang">
+            <i data-lucide="moon" id="theme-icon" style="width: 18px; height: 18px;"></i>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Session Restore Notification Banner -->
+    <div class="session-restore-banner" id="session-restore-banner" style="display: none;">
+      <div class="restore-banner-content">
+        <i data-lucide="shield-check" style="width: 20px; height: 20px; color: var(--primary-600); flex-shrink: 0;"></i>
+        <div class="restore-banner-text" id="session-restore-text">
+          Sesi verifikasi sebelumnya berhasil dipulihkan dari penyimpanan lokal.
+        </div>
+        <div class="restore-banner-actions">
+          <button class="btn btn-sm btn-primary" id="btn-dismiss-restore">Lanjutkan Koreksi</button>
+          <button class="btn btn-sm btn-outline-danger" id="btn-discard-session"
+            title="Hapus draf lama dan mulai dari awal">Mulai dari Awal</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats Banner -->
+    <section class="stats-banner" id="stats-banner">
+      <div class="stat-card">
+        <div class="stat-meta">
+          <div class="stat-label">Total Akta Diperiksa</div>
+          <div class="stat-value" id="stat-total">0</div>
+        </div>
+        <div class="stat-icon blue">
+          <i data-lucide="files" style="width: 22px; height: 22px;"></i>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-meta">
+          <div class="stat-label">Terdapat Kesalahan / Typo</div>
+          <div class="stat-value" id="stat-errors" style="color: var(--danger-600);">0</div>
+        </div>
+        <div class="stat-icon danger">
+          <i data-lucide="alert-triangle" style="width: 22px; height: 22px;"></i>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-meta">
+          <div class="stat-label">Sesuai / Telah Valid</div>
+          <div class="stat-value" id="stat-clean" style="color: var(--primary-600);">0</div>
+        </div>
+        <div class="stat-icon emerald">
+          <i data-lucide="check-circle-2" style="width: 22px; height: 22px;"></i>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-meta">
+          <div class="stat-label">Akurasi Rata-rata</div>
+          <div class="stat-value" id="stat-accuracy">0%</div>
+        </div>
+        <div class="stat-icon warning">
+          <i data-lucide="gauge" style="width: 22px; height: 22px;"></i>
+        </div>
+      </div>
+    </section>
+
+    <!-- Filter & Record Navigation Bar -->
+    <section class="record-nav-bar">
+      <div class="filter-pills" id="filter-pills">
+        <button class="filter-pill active" data-filter="all">
+          Semua Akta <span class="pill-count" id="count-all">0</span>
+        </button>
+        <button class="filter-pill" data-filter="issues">
+          Ada Selisih / Typo <span class="pill-count" id="count-issues">0</span>
+        </button>
+        <button class="filter-pill" data-filter="clean">
+          Valid / Beres <span class="pill-count" id="count-clean">0</span>
+        </button>
+      </div>
+
+      <div class="search-box">
+        <i data-lucide="search" class="search-icon-pos" style="width: 16px; height: 16px;"></i>
+        <input type="text" id="input-search" placeholder="Cari No. Akta, Nama Suami/Istri..." />
+      </div>
+
+      <div class="carousel-nav-controls">
+        <button class="btn btn-secondary btn-icon" id="btn-prev-rec" title="Akta Sebelumnya (Shortcut: [←])">
+          <i data-lucide="chevron-left" style="width: 20px; height: 20px;"></i>
+        </button>
+        <div style="display: flex; align-items: center; gap: 0.35rem;">
+          <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);">Akta</span>
+          <input type="number" id="input-jump-rec" min="1" max="1" value="1"
+            style="width: 60px; text-align: center; padding: 0.25rem 0.35rem; font-size: 0.85rem; font-weight: 700; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-main);"
+            title="Ketik nomor akta lalu tekan Enter untuk langsung menuju ke akta tersebut" />
+          <span class="nav-counter" id="nav-counter">/ 1</span>
+        </div>
+        <button class="btn btn-secondary btn-icon" id="btn-next-rec" title="Akta Berikutnya (Shortcut: [→])">
+          <i data-lucide="chevron-right" style="width: 20px; height: 20px;"></i>
+        </button>
+      </div>
+    </section>
+
+    <!-- Main Split-Screen Workspace -->
+    <main class="main-workspace">
+      <!-- Left Panel: Document Viewer -->
+      <section class="workspace-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <i data-lucide="book-open"
+              style="width: 18px; height: 18px; color: var(--primary-700); flex-shrink: 0;"></i>
+            <div class="panel-title">Fisik Buku Akta Nikah (Model N)</div>
+            <span id="pdf-folder-badge" class="pdf-folder-badge" style="display: none;"></span>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-primary" id="btn-upload-pdf-folder"
+              style="padding: 0.35rem 0.65rem; font-size: 0.78rem;"
+              title="Pilih Folder yang berisi file-file PDF scan akta nikah">
+              <i data-lucide="folder-open" style="width: 14px; height: 14px;"></i>
+              <span>Folder PDF</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-upload-pdf-files"
+              style="padding: 0.35rem 0.65rem; font-size: 0.78rem;" title="Pilih file PDF scan satuan atau banyak">
+              <i data-lucide="file-text" style="width: 14px; height: 14px;"></i>
+              <span>File PDF</span>
+            </button>
+            <button class="btn btn-outline-gold" id="btn-batch-ocr"
+              style="padding: 0.35rem 0.65rem; font-size: 0.78rem; font-weight: 700;"
+              title="Ekstraksi teks otomatis dari seluruh berkas PDF scan sekaligus (Batch OCR)">
+              <i data-lucide="sparkles" style="width: 14px; height: 14px;"></i>
+              <span>Ekstrak OCR</span>
+            </button>
+
+            <!-- Hidden inputs -->
+            <input type="file" id="file-input-pdf-folder" webkitdirectory directory multiple style="display: none;" />
+            <input type="file" id="file-input-pdf-files" multiple accept=".pdf" style="display: none;" />
+            <input type="file" id="file-input-single-photo" accept="image/*" style="display: none;" />
+          </div>
+        </div>
+
+        <!-- Dedicated Multi-Scan Secondary Sub-Toolbar -->
+        <div class="panel-subtoolbar" id="panel-subtoolbar" style="display: none;">
+          <div class="subtoolbar-left">
+            <div class="doc-select-wrapper">
+              <i data-lucide="file-text" class="doc-select-icon"></i>
+              <select id="select-pdf-document" class="select-pdf-dropdown" title="Pilih Berkas PDF Scan"></select>
+            </div>
+          </div>
+
+          <div class="subtoolbar-right">
+            <!-- Multi-page scan switcher tabs (e.g. Semua Scan (3), Scan 1, Scan 2, Scan 3) -->
+            <div id="pdf-page-tabs" class="pdf-page-tabs"></div>
+
+            <!-- View Layout Mode: Vertikal Only -->
+            <div class="scan-view-toggle" id="scan-view-toggle" style="display: none;" title="Tata Letak Tampilan Scan">
+              <button class="view-toggle-btn active" id="btn-view-vertical" title="Tampilan Halaman Tumpuk Vertikal">
+                <i data-lucide="rows" style="width: 13px; height: 13px;"></i>
+                <span>Vertikal</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="viewer-container" id="viewer-container">
+          <div class="viewer-viewport" id="viewer-viewport" tabindex="0" role="region" aria-label="Penampil Scan PDF">
+            <!-- Drag & drop overlay for dropping a folder or PDF files -->
+            <div class="viewer-drag-overlay" id="viewer-drag-overlay" style="display: none;">
+              <i data-lucide="folder-down"
+                style="width: 44px; height: 44px; margin-bottom: 0.5rem; color: #34d399;"></i>
+              <div style="font-weight: 700; font-size: 1.05rem;">Lepaskan Folder / Berkas PDF Scan di sini</div>
+              <div style="font-size: 0.8rem; opacity: 0.9; margin-top: 0.25rem;">Data langsung diekstrak dan dicocokkan
+                ke
+                form entry spreadsheet</div>
+            </div>
+
+            <div class="viewer-canvas-wrapper" id="viewer-canvas-wrapper">
+              <!-- Rendered certificate content or uploaded PDF image inserted here -->
+              <div id="cert-render-target"></div>
+            </div>
+          </div>
+
+          <!-- Floating Viewer Controls (Pinned strictly inside viewer-container, completely unaffected by scrolling) -->
+          <div class="viewer-floating-toolbar" id="viewer-floating-toolbar">
+            <!-- Scroll Controls (Up & Down) -->
+            <button class="tool-btn" id="tool-scroll-up" title="Gulir Halaman ke Atas (↑ atau Scroll Mouse)">
+              <i data-lucide="chevron-up" style="width: 17px; height: 17px;"></i>
+            </button>
+            <button class="tool-btn" id="tool-scroll-down" title="Gulir Halaman ke Bawah (↓ atau Scroll Mouse)">
+              <i data-lucide="chevron-down" style="width: 17px; height: 17px;"></i>
+            </button>
+
+            <div class="tool-divider"></div>
+
+            <!-- Zoom Controls -->
+            <button class="tool-btn" id="tool-zoom-out" title="Perkecil Zoom (- atau Ctrl+Scroll Bawah)">
+              <i data-lucide="zoom-out" style="width: 16px; height: 16px;"></i>
+            </button>
+            <span class="zoom-level-text" id="zoom-level-text">100%</span>
+            <button class="tool-btn" id="tool-zoom-in" title="Perbesar Zoom (+ atau Ctrl+Scroll Atas)">
+              <i data-lucide="zoom-in" style="width: 16px; height: 16px;"></i>
+            </button>
+
+            <div class="tool-divider"></div>
+
+            <!-- Reset & Rotation -->
+            <button class="tool-btn" id="tool-reset-zoom" title="Reset Tampilan & Kembali ke Paling Atas (100%)">
+              <i data-lucide="maximize" style="width: 16px; height: 16px;"></i>
+            </button>
+            <button class="tool-btn" id="tool-rotate" title="Putar 90 Derajat">
+              <i data-lucide="rotate-cw" style="width: 16px; height: 16px;"></i>
+            </button>
+
+            <div class="tool-divider"></div>
+
+            <!-- Filters & OCR -->
+            <button class="tool-btn" id="tool-contrast" title="Tingkatkan Kontras (Tulisan Pudar)">
+              <i data-lucide="sun-medium" style="width: 16px; height: 16px;"></i>
+            </button>
+            <button class="tool-btn" id="tool-ocr" title="Jalankan OCR Pemindai Teks Otomatis">
+              <i data-lucide="scan-text" style="width: 16px; height: 16px;"></i>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Panel: Field-by-Field Proofreader -->
+      <section class="workspace-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <i data-lucide="clipboard-check" style="width: 18px; height: 18px; color: var(--accent-gold);"></i>
+            <div class="panel-title">Proofreader & Form Entry Spreadsheet</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-secondary" id="btn-sync-all-fields"
+              style="padding: 0.35rem 0.65rem; font-size: 0.78rem;"
+              title="Samakan seluruh data Buku Akta Nikah (4 bidang) dengan Entry Spreadsheet yang telah dimasukkan">
+              <i data-lucide="check-check" style="width: 14px; height: 14px; color: var(--primary-600);"></i>
+              <span>Samakan Buku dengan Spreadsheet</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="proofread-content" id="proofread-content">
+          <!-- Dynamic fields and evaluation items populated by main.js -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Upload Modal -->
+  <div class="modal-overlay" id="modal-upload">
+    <div class="modal-card" style="max-width: 980px;">
+      <div class="modal-header">
+        <div class="modal-title">Unggah Data Spreadsheet (Excel) & Folder PDF Scan Akta</div>
+        <button class="btn btn-icon" id="btn-close-upload-modal">
+          <i data-lucide="x" style="width: 18px; height: 18px;"></i>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;">
+          <!-- Excel Dropzone -->
+          <div>
+            <div style="font-weight: 700; font-size: 0.85rem; margin-bottom: 0.65rem; color: var(--text-main);">① File
+              Spreadsheet Entry Data KUA</div>
+            <div class="dropzone" id="excel-dropzone">
+              <i data-lucide="file-spreadsheet" class="dropzone-icon"></i>
+              <div class="dropzone-title">Seret File Excel / CSV</div>
+              <div class="dropzone-sub">Format .xlsx, .xls, .csv</div>
+              <input type="file" id="file-input-excel" accept=".xlsx,.xls,.csv" style="display: none;" />
+              <button class="btn btn-primary" style="margin-top: 0.75rem; font-size: 0.8rem;" type="button"
+                onclick="document.getElementById('file-input-excel').click()">
+                <i data-lucide="file-spreadsheet" style="width: 14px; height: 14px;"></i>
+                <span>Pilih File Excel</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- PDF Folder Dropzone -->
+          <div>
+            <div style="font-weight: 700; font-size: 0.85rem; margin-bottom: 0.65rem; color: var(--text-main);">② Folder
+              / Berkas PDF Scan Buku Akta Nikah</div>
+            <div class="dropzone dropzone-pdf" id="pdf-dropzone">
+              <i data-lucide="folder-open" class="dropzone-icon dropzone-icon-pdf"></i>
+              <div class="dropzone-title">Seret Folder atau File PDF Scan</div>
+              <div class="dropzone-sub">Mendukung Folder berisi puluhan file PDF atau PDF multi-halaman</div>
+              <div style="display: flex; gap: 0.5rem; justify-content: center; margin-top: 0.85rem; flex-wrap: wrap;">
+                <button class="btn btn-primary" id="btn-modal-pick-folder" type="button" style="font-size: 0.8rem;">
+                  <i data-lucide="folder-open" style="width: 14px; height: 14px;"></i>
+                  <span>Pilih Folder PDF</span>
+                </button>
+                <button class="btn btn-outline-gold" id="btn-modal-pick-files" type="button" style="font-size: 0.8rem;">
+                  <i data-lucide="file-text" style="width: 14px; height: 14px;"></i>
+                  <span>Pilih File PDF</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PDF Load Status & Progress -->
+        <div id="pdf-load-status" class="pdf-load-status-box" style="display: none;">
+          <div class="pdf-load-status-text" id="pdf-load-status-text">Memproses berkas...</div>
+          <div class="pdf-reading-progress-bar" id="pdf-progress-bar" style="display: none;">
+            <div class="pdf-reading-progress-fill" id="pdf-progress-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <div class="modal-info-box">
+          <div class="modal-info-title">
+            <i data-lucide="sparkles" style="width: 16px; height: 16px; color: var(--accent-gold);"></i>
+            <span>Bisa Unggah Scan PDF Saja (Tanpa Perlu File Excel Awal):</span>
+          </div>
+          <div style="font-size: 0.8rem; color: var(--text-main); line-height: 1.55;">
+            • Anda cukup memilih <strong>Folder PDF</strong> atau <strong>File-file PDF Scan</strong> (contoh:
+            <code>1.pdf</code>, <code>2.pdf</code>, dst).<br>
+            • Sistem otomatis mengekstrak nomor dokumen, tanggal, nama pengantin laki-laki & perempuan.<br>
+            • Gunakan tombol <strong>"Ekstrak OCR Semua"</strong> untuk memindai seluruh dokumen scan sekaligus.<br>
+            • Setelah selesai, Anda dapat langsung mengunduh spreadsheet rapi dengan tombol <strong>"Template Arsip
+              (PW.01)"</strong> (sesuai format inventaris arsip vital Kemenag).
+          </div>
+          <button class="btn" id="btn-modal-smart-autofix" type="button"
+            style="margin-top: 0.75rem; background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: #ffffff; font-weight: 700; border: none; width: 100%; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35); padding: 0.6rem 1rem;">
+            <i data-lucide="wand-2" style="width: 16px; height: 16px;"></i>
+            <span>⚡ Terapkan Prediksi Cepat (0 Detik) & Normalisasi Otomatis</span>
+          </button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-cancel-upload">Tutup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch OCR Progress Modal -->
+  <div class="modal-overlay" id="modal-batch-ocr">
+    <div class="modal-card" style="max-width: 580px;">
+      <div class="modal-header">
+        <div class="modal-title" style="display: flex; align-items: center; gap: 0.5rem;">
+          <i data-lucide="sparkles" style="width: 20px; height: 20px; color: var(--accent-gold);"></i>
+          <span>Ekstraksi Teks Cepat (Targeted ROI Crop OCR)</span>
+        </div>
+        <button class="btn btn-icon" id="btn-close-batch-ocr">
+          <i data-lucide="x" style="width: 18px; height: 18px;"></i>
+        </button>
+      </div>
+      <div class="modal-body" style="padding: 1.5rem;">
+        <div style="font-size: 0.88rem; color: var(--text-main); margin-bottom: 1rem; line-height: 1.5;">
+          Sistem sedang memproses seluruh berkas scan PDF menggunakan <strong>Targeted ROI Crop OCR</strong> dan
+          ekstraktor cerdas untuk mendeteksi
+          <strong>Nomor Akta</strong>, <strong>Tanggal Akad</strong>, <strong>Nama Suami</strong>, dan
+          <strong>Nama Istri</strong> (~1 detik per dokumen).
+        </div>
+
+        <div
+          style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; font-size: 0.82rem; font-weight: 700;">
+          <span id="batch-ocr-status-text">Menyiapkan modul OCR...</span>
+          <span id="batch-ocr-percent-text">0%</span>
+        </div>
+
+        <div
+          style="background: var(--border-color); border-radius: var(--radius-full); height: 10px; overflow: hidden; margin-bottom: 1rem;">
+          <div id="batch-ocr-progress-bar"
+            style="background: linear-gradient(90deg, var(--primary-600), var(--accent-gold)); height: 100%; width: 0%; transition: width 0.3s ease;">
+          </div>
+        </div>
+
+        <div id="batch-ocr-current-doc"
+          style="font-size: 0.78rem; color: var(--text-muted); font-family: var(--font-mono); background: var(--bg-surface); padding: 0.5rem 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color); word-break: break-all;">
+          Memulai proses...
+        </div>
+      </div>
+      <div class="modal-footer"
+        style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;">
+        <button class="btn btn-sm" id="btn-batch-instant-fix"
+          style="background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: #fff; font-weight: 700; border: none; font-size: 0.78rem; padding: 0.4rem 0.85rem;"
+          title="Terapkan urutan nomor KUA dan tanggal nikah seketika">
+          ⚡ Prediksi Cepat (0 Detik)
+        </button>
+        <button class="btn btn-secondary btn-sm" id="btn-stop-batch-ocr">Hentikan</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Berita Acara Modal -->
+  <div class="modal-overlay" id="modal-ba">
+    <div class="modal-card" style="max-width: 1000px;">
+      <div class="modal-header">
+        <div class="modal-title">Berita Acara Rekapitulasi Proofreading Akta Nikah</div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button class="btn btn-primary" id="btn-print-ba">
+            <i data-lucide="printer" style="width: 16px; height: 16px;"></i>
+            <span>Cetak / Simpan PDF</span>
+          </button>
+          <button class="btn btn-icon" id="btn-close-ba-modal">
+            <i data-lucide="x" style="width: 18px; height: 18px;"></i>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body" id="ba-modal-content" style="padding: 0; background: white;">
+        <!-- Generated official Berita Acara HTML will be inserted here -->
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>

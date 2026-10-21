@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient (Rich Emerald / Islamic Green) -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="35%" stop-color="#059669"/>
+      <stop offset="75%" stop-color="#047857"/>
+      <stop offset="100%" stop-color="#022c22"/>
+    </linearGradient>
+
+    <!-- Luxurious Gold Accent Gradient -->
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="30%" stop-color="#fde047"/>
+      <stop offset="65%" stop-color="#f59e0b"/>
+      <stop offset="85%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+
+    <!-- Gold Border Ring -->
+    <linearGradient id="goldBorder" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#b45309"/>
+      <stop offset="30%" stop-color="#f59e0b"/>
+      <stop offset="70%" stop-color="#fef08a"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+
+    <!-- Verified Badge Gradient -->
+    <linearGradient id="badgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="40%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+
+    <!-- Soft Parchment Page Gradient -->
+    <linearGradient id="pageLeft" x1="100%" y1="50%" x2="0%" y2="50%">
+      <stop offset="0%" stop-color="#e2e8f0"/>
+      <stop offset="25%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+
+    <linearGradient id="pageRight" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#e2e8f0"/>
+      <stop offset="25%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+
+    <!-- Drop Shadows -->
+    <filter id="mainShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#011812" flood-opacity="0.55"/>
+    </filter>
+
+    <filter id="bookShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#022119" flood-opacity="0.45"/>
+    </filter>
+
+    <filter id="badgeShadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#022119" flood-opacity="0.6"/>
+    </filter>
+
+    <!-- Top Gloss Effect -->
+    <linearGradient id="topGloss" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Outer Squircle with Deep Shadow -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bgGrad)" filter="url(#mainShadow)"/>
+  
+  <!-- Outer Gold Border Rim (Prestigious KUA/Kemenag Look) -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="none" stroke="url(#goldBorder)" stroke-width="12"/>
+
+  <!-- Top Glass Highlight -->
+  <path d="M 28 136 C 28 76, 76 28, 136 28 L 376 28 C 436 28, 484 76, 484 136 C 484 170, 360 145, 256 145 C 152 145, 28 170, 28 136 Z" fill="url(#topGloss)"/>
+
+  <!-- Book Elements (Buku Akta Nikah) -->
+  <g filter="url(#bookShadow)">
+    <!-- Book Leather Base / Cover Rim (Gold Edges) -->
+    <path d="M 92 152 
+             C 140 142, 210 142, 256 160 
+             C 302 142, 372 142, 420 152 
+             C 426 154, 432 160, 432 168 
+             L 432 344 
+             C 432 352, 424 358, 416 356 
+             C 370 346, 302 346, 256 364 
+             C 210 346, 142 346, 96 356 
+             C 88 358, 80 352, 80 344 
+             L 80 168 
+             C 80 160, 86 154, 92 152 Z" 
+          fill="url(#goldGrad)"/>
+
+    <!-- Undercover Shadow / Binding -->
+    <path d="M 96 160 
+             C 142 150, 212 150, 256 166 
+             C 300 150, 370 150, 416 160 
+             L 416 348 
+             C 370 338, 300 338, 256 354 
+             C 212 338, 142 338, 96 348 Z" 
+          fill="#022c22" opacity="0.6"/>
+
+    <!-- Left Page (Parchment White) -->
+    <path d="M 104 164 
+             C 146 156, 212 156, 252 170 
+             L 252 346 
+             C 212 332, 146 332, 104 340 Z" 
+          fill="url(#pageLeft)"/>
+
+    <!-- Right Page (Parchment White) -->
+    <path d="M 260 170 
+             C 300 156, 366 156, 408 164 
+             L 408 340 
+             C 366 332, 300 332, 260 346 Z" 
+          fill="url(#pageRight)"/>
+
+    <!-- Book Spine Center Fold -->
+    <path d="M 252 170 L 260 170 L 260 346 L 252 346 Z" fill="#cbd5e1"/>
+    
+    <!-- Left Page Official Akta Details (Gold Foil Lines & Emblem) -->
+    <!-- Mini Kemenag / Garuda Emblem on Left Page -->
+    <circle cx="178" cy="208" r="16" fill="url(#goldGrad)" opacity="0.95"/>
+    <circle cx="178" cy="208" r="11" fill="#047857"/>
+    <path d="M 178 200 L 180 206 L 186 206 L 181 210 L 183 216 L 178 212 L 173 216 L 175 210 L 170 206 L 176 206 Z" fill="url(#goldGrad)"/>
+
+    <!-- Gold Text Lines representing Marriage Registry -->
+    <rect x="136" y="240" width="84" height="6" rx="3" fill="url(#goldGrad)" opacity="0.85"/>
+    <rect x="136" y="256" width="68" height="6" rx="3" fill="#94a3b8" opacity="0.6"/>
+    <rect x="136" y="272" width="76" height="6" rx="3" fill="#94a3b8" opacity="0.6"/>
+    <rect x="136" y="288" width="56" height="6" rx="3" fill="#94a3b8" opacity="0.6"/>
+    <rect x="136" y="304" width="72" height="6" rx="3" fill="url(#goldGrad)" opacity="0.85"/>
+
+    <!-- Right Page Text Lines (Under Badge) -->
+    <rect x="284" y="200" width="80" height="6" rx="3" fill="#94a3b8" opacity="0.6"/>
+    <rect x="284" y="216" width="70" height="6" rx="3" fill="#94a3b8" opacity="0.6"/>
+    <rect x="284" y="232" width="76" height="6" rx="3" fill="url(#goldGrad)" opacity="0.85"/>
+  </g>
+
+  <!-- Big Verified Seal Badge (Bottom Right Overlap with Drop Shadow) -->
+  <g filter="url(#badgeShadow)">
+    <!-- Gold Ring Background -->
+    <circle cx="340" cy="310" r="76" fill="url(#goldGrad)"/>
+    
+    <!-- Outer Decorative Teeth / Seal Edge -->
+    <circle cx="340" cy="310" r="70" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6,4"/>
+
+    <!-- Emerald Verified Core -->
+    <circle cx="340" cy="310" r="64" fill="url(#badgeGrad)"/>
+    
+    <!-- Inner Fine Ring -->
+    <circle cx="340" cy="310" r="58" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2.5"/>
+
+    <!-- Bold White Verification Checkmark -->
+    <path d="M 308 310 
+             L 330 332 
+             L 374 286" 
+          fill="none" 
+          stroke="#ffffff" 
+          stroke-width="15" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+  </g>
+
+  <!-- 4-Point Golden Sparkle (Top Right of Badge) -->
+  <g transform="translate(400, 116)">
+    <path d="M 0 -28 Q 0 0, 28 0 Q 0 0, 0 28 Q 0 0, -28 0 Q 0 0, 0 -28 Z" fill="url(#goldGrad)"/>
+    <circle cx="0" cy="0" r="6" fill="#ffffff"/>
+  </g>
+
+  <!-- Small Accent Sparkle (Left Side) -->
+  <g transform="translate(86, 126) scale(0.6)">
+    <path d="M 0 -24 Q 0 0, 24 0 Q 0 0, 0 24 Q 0 0, -24 0 Q 0 0, 0 -24 Z" fill="url(#goldGrad)"/>
+    <circle cx="0" cy="0" r="5" fill="#ffffff"/>
+  </g>
+</svg>
