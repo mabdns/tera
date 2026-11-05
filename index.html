@@ -42,16 +42,16 @@
             <span id="autosave-text">Tersimpan Otomatis</span>
           </div>
 
+          <!-- Local AI OCR Status Badge -->
+          <div class="ai-status-badge" id="ai-status-badge" title="Status Engine AI OCR Lokal (PaddleOCR PP-OCRv4)">
+            <span class="ai-status-dot" id="ai-status-dot"></span>
+            <span id="ai-status-text">AI Lokal: Memeriksa...</span>
+          </div>
+
 
           <button class="btn btn-secondary" id="btn-open-upload" title="Unggah file Excel dan/atau Foto Scan Buku">
             <i data-lucide="upload" style="width: 16px; height: 16px;"></i>
             <span>Unggah Data / Scan</span>
-          </button>
-
-          <button class="btn btn-outline-gold" id="btn-open-ba"
-            title="Lihat & Cetak Berita Acara Rekapitulasi Kesalahan">
-            <i data-lucide="file-text" style="width: 16px; height: 16px;"></i>
-            <span>Berita Acara Koreksi</span>
           </button>
 
           <button class="btn" id="btn-smart-autofix"
@@ -70,10 +70,6 @@
           <button class="btn btn-secondary btn-icon" id="btn-reset-session"
             title="Mulai Sesi Baru / Bersihkan Draf Penyimpanan">
             <i data-lucide="rotate-ccw" style="width: 16px; height: 16px;"></i>
-          </button>
-
-          <button class="btn btn-icon" id="btn-toggle-theme" title="Ubah Tema Gelap/Terang">
-            <i data-lucide="moon" id="theme-icon" style="width: 18px; height: 18px;"></i>
           </button>
         </div>
       </div>
@@ -295,25 +291,37 @@
         </div>
       </section>
 
-      <!-- Right Panel: Field-by-Field Proofreader -->
-      <section class="workspace-panel">
+      <!-- Right Panel: Field-by-Field Proofreader & Document Table -->
+      <section class="workspace-panel proofreader-panel">
         <div class="panel-header">
           <div class="panel-title-group">
             <i data-lucide="clipboard-check" style="width: 18px; height: 18px; color: var(--accent-gold);"></i>
-            <div class="panel-title">Proofreader & Form Entry Spreadsheet</div>
+            <div class="panel-title">Proofreader & Validasi Spreadsheet</div>
           </div>
           <div class="panel-actions">
+            <!-- View Mode Tabs (Tabel Rekap vs Detail Dokumen) -->
+            <div class="proofread-view-tabs" id="proofread-view-tabs">
+              <button class="view-tab-btn active" id="tab-btn-table" type="button" title="Tampilkan Rekapitulasi Kolom & Baris Seluruh Dokumen">
+                <i data-lucide="sheet" style="width: 14px; height: 14px;"></i>
+                <span>Tabel Dokumen</span>
+                <span class="tab-badge-count" id="table-tab-badge" style="display: none;">0</span>
+              </button>
+              <button class="view-tab-btn" id="tab-btn-detail" type="button" title="Tampilkan Formulir Pemeriksaan Detail Dokumen Terpilih">
+                <i data-lucide="file-text" style="width: 14px; height: 14px;"></i>
+                <span>Detail Akta</span>
+              </button>
+            </div>
             <button class="btn btn-secondary" id="btn-sync-all-fields"
               style="padding: 0.35rem 0.65rem; font-size: 0.78rem;"
               title="Samakan seluruh data Buku Akta Nikah (4 bidang) dengan Entry Spreadsheet yang telah dimasukkan">
               <i data-lucide="check-check" style="width: 14px; height: 14px; color: var(--primary-600);"></i>
-              <span>Samakan Buku dengan Spreadsheet</span>
+              <span>Samakan Buku</span>
             </button>
           </div>
         </div>
 
         <div class="proofread-content" id="proofread-content">
-          <!-- Dynamic fields and evaluation items populated by main.js -->
+          <!-- Dynamic table or field evaluation items populated by main.js -->
         </div>
       </section>
     </main>
@@ -449,27 +457,6 @@
           ⚡ Prediksi Cepat (0 Detik)
         </button>
         <button class="btn btn-secondary btn-sm" id="btn-stop-batch-ocr">Hentikan</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Berita Acara Modal -->
-  <div class="modal-overlay" id="modal-ba">
-    <div class="modal-card" style="max-width: 1000px;">
-      <div class="modal-header">
-        <div class="modal-title">Berita Acara Rekapitulasi Proofreading Akta Nikah</div>
-        <div style="display: flex; gap: 0.5rem;">
-          <button class="btn btn-primary" id="btn-print-ba">
-            <i data-lucide="printer" style="width: 16px; height: 16px;"></i>
-            <span>Cetak / Simpan PDF</span>
-          </button>
-          <button class="btn btn-icon" id="btn-close-ba-modal">
-            <i data-lucide="x" style="width: 18px; height: 18px;"></i>
-          </button>
-        </div>
-      </div>
-      <div class="modal-body" id="ba-modal-content" style="padding: 0; background: white;">
-        <!-- Generated official Berita Acara HTML will be inserted here -->
       </div>
     </div>
   </div>

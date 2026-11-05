@@ -7,7 +7,6 @@
 
 import * as pdfjsLib from 'pdfjs-dist';
 import { loadRenderedScanFromDB, saveRenderedScanToDB } from './storageHelper.js';
-import { getKuaVerifiedRecord } from './kuaDatabase.js';
 
 // Configure the PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -63,7 +62,7 @@ export function comparePDFFileNames(fileA, fileB) {
  * 4. Nama Pengantin Perempuan (namaIstri)
  * 
  * @param {string} text - Raw text extracted from PDF
- * @param {string} fileName - File name for fallback patterns
+ * @param {string} fileName - Retained for compatibility; never used as field evidence
  * @returns {Object} Extracted KUA fields
  */
 export function parseKUAFieldsFromText(text, fileName = '') {
@@ -120,84 +119,11 @@ export function parseKUAFieldsFromText(text, fileName = '') {
       }
     }
 
-    // 1d. Fallback for Sawahan 2016 sequence if file number is known (e.g. 1.pdf -> 1001/030/XI/2016)
-    if (!fields.noAkta && fileName) {
-      const fileNumMatch = fileName.match(/(\d+)\.pdf/i);
-      if (fileNumMatch) {
-        const num = parseInt(fileNumMatch[1], 10);
-        if (num > 0) {
-          const actNum = 1000 + num;
-          const regNum = String(29 + num).padStart(3, '0');
-          fields.noAkta = `${actNum}/${regNum}/XI/2016`;
-        }
-      }
-    }
 
-    // 2. Tanggal Dokumen / Tanggal Akad Nikah
-    // IMPORTANT: In Model N marriage books, the marriage date is in the registration header:
-    // "Pada hari ini SABTU tanggal 05 bulan NOVEMBER tahun 2016 Masehi"
-    // We must prioritize this and strictly IGNORE groom/bride/parent birth dates!
-
-    // 2a. Model N Marriage Header format: "Pada hari [ini] [Hari] tanggal [DD] bulan [BULAN] tahun [YYYY]"
-    const modelNDateRegex = /(?:Pada\s*hari(?:\s*ini)?\s*[A-Za-z]+[\s\.\,]+)?(?:tanggal|tgl)\s*[:=\.\s]*([O0-9]{1,2}|0\s*[SE5]|[O0]\d)\s*bulan\s*([A-Za-z]+)\s*[\.\s]*tahun\s*[\.\s]*(\d{4})/i;
-    const modelNMatch = cleanText.match(modelNDateRegex);
-    if (modelNMatch && modelNMatch[1] && modelNMatch[2] && modelNMatch[3]) {
-      let day = modelNMatch[1].replace(/0\s*[SE]/i, '05').replace(/^O/i, '0').padStart(2, '0');
-      let mStr = modelNMatch[2].toLowerCase();
-      const monthMap = {
-        januari: '01', februari: '02', maret: '03', april: '04', mei: '05', juni: '06',
-        juli: '07', agustus: '08', september: '09', oktober: '10', november: '11', nopember: '11', desember: '12'
-      };
-      let month = monthMap[mStr] || '11';
-      let year = modelNMatch[3];
-      fields.tglAkad = `${day}-${month}-${year}`;
-    }
-
-    // 2b. Explicit label: "Tanggal Akad Nikah / Tanggal Dokumen"
-    if (!fields.tglAkad) {
-      const dateRegex = /(?:Tanggal\s*(?:Dokumen|Akad|Nikah|Perkawinan)|Tgl\s*(?:Dokumen|Akad|Nikah)|waktu\s*akad\s*nikah\s*dilangsungkan|pada\s*tanggal)\s*[:=]?\s*(?:(?:Senin|Selasa|Rabu|Kamis|Jum['’]?at|Sabtu|Ahad|Minggu),?\s*)?(\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}|\d{1,2}[\/\-\s](?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Nopember|Desember|\d{1,2})[\/\-\s]\d{4})/i;
-      const dateMatch = cleanText.match(dateRegex);
-      if (dateMatch && dateMatch[1]) {
-        const norm = normalizeDateString(dateMatch[1]);
-        // Validate year: marriage date year cannot be < 2000 for a 2016 book
-        const yearPart = norm.split('-')[2];
-        if (yearPart && parseInt(yearPart, 10) >= 2000) {
-          fields.tglAkad = norm;
-        }
-      }
-    }
-
-    // 2c. Fallback for date in akad block (excluding birth dates)
-    if (!fields.tglAkad) {
-      // Remove any birth date sections to avoid false positives (Tempat dan tanggal lahir)
-      const textWithoutBirthdates = cleanText.replace(/(?:tempat\s*(?:dan)?\s*tanggal\s*lahir|tgl\s*lahir|lahir)[\s\S]{1,60}?(?:\d{1,2}[\/\-\s][A-Za-z0-9]+[\/\-\s]\d{4})/gi, '');
-      const dmyPattern = textWithoutBirthdates.match(/\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.](?:20)\d{2})\b/);
-      if (dmyPattern) {
-        fields.tglAkad = normalizeDateString(dmyPattern[1]);
-      } else {
-        const monthNameDate = textWithoutBirthdates.match(/\b(\d{1,2}[\/\-\s](?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Nopember|Desember)[\/\-\s](?:20)\d{2})\b/i);
-        if (monthNameDate) {
-          fields.tglAkad = normalizeDateString(monthNameDate[1]);
-        }
-      }
-    }
-
-    // 2d. Smart fallback from verified KUA database or file index
-    if (fileName) {
-      const fileNumMatch = fileName.match(/(\d+)\.pdf/i);
-      if (fileNumMatch) {
-        const num = parseInt(fileNumMatch[1], 10);
-        const kuaRec = getKuaVerifiedRecord(num);
-        if (kuaRec) {
-          if (!fields.tglAkad || /\b(19\d\d)\b/.test(fields.tglAkad)) fields.tglAkad = kuaRec.tglAkad;
-          if (!fields.noAkta) fields.noAkta = kuaRec.noAkta;
-          if (!fields.namaSuami && kuaRec.namaSuami) fields.namaSuami = kuaRec.namaSuami;
-          if (!fields.namaIstri && kuaRec.namaIstri) fields.namaIstri = kuaRec.namaIstri;
-        } else if (!fields.tglAkad) {
-          fields.tglAkad = '12-11-2016';
-        }
-      }
-    }
+    // 2. Dates need marriage-specific evidence, never month proximity or a
+    // generic document/birth/examination date elsewhere in the scan.
+    const marriageDate = extractMarriageDate(cleanText);
+    if (marriageDate) fields.tglAkad = marriageDate;
 
     // 3. Pasangan Pengantin dari Format Register: "Register Nikah a/n SUAMI dan ISTRI" atau "a/n SUAMI dan ISTRI"
     const coupleMatch = cleanText.match(/(?:Register\s*Nikah\s*)?a\/n\s+([A-Za-z\s\.\,\'\`]+?)\s+dan\s+([A-Za-z\s\.\,\'\`]+?)(?:\s*(?:\r|\n|;|\.|$))/i);
@@ -208,36 +134,34 @@ export function parseKUAFieldsFromText(text, fileName = '') {
       if (cleanIstri) fields.namaIstri = cleanIstri;
     }
 
-    // 4. Section-Aware Extraction (Suami & Isteri)
-    if (!fields.namaSuami) {
-      const namaSuamiMatch = cleanText.match(/(?:(?:^|\n|\r)\s*(?:\.|\-)?\s*SUAMI[\s\S]*?1\.\s*Nama\s*(?:lengkap)?|III\.\s*Suami:\s*1\.\s*Nama\s*lengkap(?:\s*dan\s*aliasnya)?|Nama\s*(?:Lengkap)?\s*(?:Suami|Pengantin\s*Laki[\-\s]?laki)|Pengantin\s*Laki[\-\s]?laki|Pengantin\s*Laki|Mempelai\s*Pria)\s*[\:\.\-\=\s]*\s*([^\n\r;]{3,70})/i);
-      if (namaSuamiMatch && namaSuamiMatch[1]) {
-        const cleaned = cleanPersonName(namaSuamiMatch[1]);
-        if (cleaned) fields.namaSuami = cleaned;
+    // Assign names only from an explicit spouse label or a bounded spouse
+    // section. A missing name must not consume the next section's text.
+    const roles = [
+      {
+        key: 'namaSuami',
+        direct: /\b(?:Nama[ \t]*(?:Lengkap[ \t]*)?(?:Suami|Pengantin[ \t]*Laki[ -]?laki)|Pengantin[ \t]*Laki[ -]?laki|Mempelai[ \t]*Pria)(?:[ \t]*[:=][ \t]*|[ \t]+)([^\n\r;]+)/i,
+        header: /(?:^|\n)[ \t]*(?:III\.[ \t]*)?SUAMI\b[ \t]*[:;]?|\bIII\.[ \t]*Suami[ \t]*[:;]/i
+      },
+      {
+        key: 'namaIstri',
+        direct: /\b(?:Nama[ \t]*(?:Lengkap[ \t]*)?(?:Istri|Isteri|Pengantin[ \t]*(?:Perempuan|Wanita))|Pengantin[ \t]*(?:Perempuan|Wanita)|Mempelai[ \t]*Wanita)(?:[ \t]*[:=][ \t]*|[ \t]+)([^\n\r;]+)/i,
+        header: /(?:^|\n)[ \t]*(?:V\.[ \t]*)?(?:ISTERI|ISTRI)\b[ \t]*[:;]?|\bV\.[ \t]*Isteri[ \t]*[:;]/i
       }
-    }
-
-    if (!fields.namaIstri) {
-      const isteriSection = cleanText.split(/(?:(?:^|\n|\r)\s*(?:\.|\-)?\s*(?:ISTERI|ISTRI)|V\.\s*Isteri|Mempelai\s*Wanita|Pengantin\s*Perempuan)/i)[1] || '';
-      const namaIstriMatch = isteriSection.match(/(?:(?:1\.\s*)?(?:Nama|[1i]ma)\s*(?:lengkap)?|Nama\s*(?:Lengkap)?\s*(?:Istri|Isteri)|(?:[1i]ma|[Nn]ama)\s*lengkap)\s*[\:\.\-\=\©\s]*[\-—\s]*([^\n\r;]{3,70})/i) ||
-        cleanText.match(/(?:V\.\s*Isteri[;:]\s*1\.\s*Nama\s*lengkap(?:\s*dan\s*aliasnya)?|Nama\s*(?:Lengkap)?\s*(?:Istri|Isteri|Pengantin\s*Perempuan|Pengantin\s*Wanita)|Pengantin\s*Perempuan|Pengantin\s*Wanita|Mempelai\s*Wanita)\s*[:=]?\s*([^\n\r;]{3,70})/i);
-      if (namaIstriMatch && namaIstriMatch[1]) {
-        const cleaned = cleanPersonName(namaIstriMatch[1]);
-        if (cleaned) fields.namaIstri = cleaned;
+    ];
+    for (const { key, direct, header } of roles) {
+      if (fields[key]) continue;
+      const directMatch = cleanText.match(direct);
+      if (directMatch) {
+        const name = cleanPersonName(directMatch[1]);
+        if (name) fields[key] = name;
+        continue;
       }
-    }
-
-    // 5. Sequential Fallback: If Suami or Istri still missing, find all "Nama lengkap" entries
-    if (!fields.namaSuami || !fields.namaIstri) {
-      const nameMatches = [...cleanText.matchAll(/(?:(?:1\.\s*)?(?:Nama|[1i]ma)\s*lengkap|Pengantin\s*(?:Laki|Perempuan)|Mempelai\s*(?:Pria|Wanita))\s*[\:\.\-\=\©\s]*[\-—\s]*([^\n\r;]{3,70})/gi)];
-      if (!fields.namaSuami && nameMatches[0]) {
-        const cleaned = cleanPersonName(nameMatches[0][1]);
-        if (cleaned) fields.namaSuami = cleaned;
-      }
-      if (!fields.namaIstri && nameMatches[1]) {
-        const cleaned = cleanPersonName(nameMatches[1][1]);
-        if (cleaned) fields.namaIstri = cleaned;
-      }
+      const sectionMatch = cleanText.match(header);
+      if (!sectionMatch) continue;
+      const section = cleanText.slice(sectionMatch.index + sectionMatch[0].length)
+        .split(/(?:^|\n)[ \t]*(?:[IVX]+\.[ \t]*)?(?:SUAMI|ISTERI|ISTRI|WALI|AYAH|IBU)\b|\b[IVX]+\.[ \t]*(?:SUAMI|ISTERI|ISTRI|WALI)\b/i)[0];
+      const name = extractNameFromColumnText(section);
+      if (name) fields[key] = name;
     }
   } catch (err) {
     console.warn('Gagal mem-parsing teks KUA:', err);
@@ -246,115 +170,32 @@ export function parseKUAFieldsFromText(text, fileName = '') {
   return fields;
 }
 
-// Known legal boilerplate & blangko keywords that indicate extracted text is form noise, not a person's name
-const BLANGKO_NOISE_KEYWORDS = [
-  'isteri', 'suami', 'dispensasi', 'persetujuan', 'izin', 'pengadilan', 'pasal',
-  'undang-undang', 'folio', 'tempat tinggal', 'pekerjaan', 'agama', 'umur',
-  'wali', 'alias', 'model a', 'model n', 'blangko', 'surat', 'tertanggal', 'nomor',
-  'mencapai', 'tahun', 'kua', 'kecamatan', 'kewarganegaraan', 'perkawinan', 'hukum',
-  'induk kependudukan', 'pencatatan nikah'
-];
-
 export function cleanPersonName(raw) {
-  if (!raw) return '';
-  let str = raw;
-
-  // Extract after 'Nama lengkap' or 'Nama' if present anywhere in the string
-  const labelMatch = str.match(/(?:Nama|[1i]ma)\s*(?:lengkap)?\s*[:=\.\-\s—_~]*(.*)/i);
-  if (labelMatch && labelMatch[1]) {
-    str = labelMatch[1];
-  }
-
-  // Strip leading non-letters, digits, bullets, line numbers (e.g. "3 RIZKALEA" -> "RIZKALEA")
-  str = str.replace(/^[0-9\.\s\—\-\:\=\©\|\{\}\(\)\[\]\^~]+/g, '');
-  str = str.replace(/^(?:[a-z0-9]{1,3}\s+)+/gi, '');
-  str = str.replace(/\.{2,}/g, '');
-  str = str.replace(/[\r\n\t]+.*/g, '');
-
-  // Cut off at secondary labels or noise words
-  str = str.split(/(?:[\s\=\-\~]{3,}|\.{3,}|\b(?:2\.|bin|binti|SAT TEAN|morose|naa Nana|almarhum|ALM|tahun|umur|agama|pekerjaan|tempat|folio|status|mor|nik|lahir)\b)/i)[0].trim();
-
-  // Strip leading lowercase noise artifact from dot-matrix (e.g. "es VERYS" -> "VERYS")
-  str = str.replace(/^[a-z]{1,3}\s+(?=[A-Z]{2,})/g, '');
-
-  // Reconstruct known joined words & OCR misrecognitions
-  str = str
-    .replace(/\bADECATUR\b/i, 'ADE CATUR')
-    .replace(/\bELYADWIAWANG\b/i, 'ELYA DWI AWANG')
-    .replace(/\bAHGGA(?:RA)?\b/i, 'ANGGARA')
-    .replace(/\bRIZKALEA\b/i, 'RIZKALIA')
-    .replace(/\bWAHYUNIN(?:GTIAS)?\b/i, 'WAHYUNINGTIAS')
-    .replace(/\bFARAHNURUL\b/i, 'FARAH NURUL')
-    .replace(/\bCHRISTIANTOR[Q0]\b/i, 'CHRISTIANTORO')
-    .replace(/\bYANUAR[EI]\b/i, 'YANUARI')
-    .replace(/\bPRASETIY[Q0]\b/i, 'PRASETIYO')
-    .replace(/\bHARDIIT[Q0]\b/i, 'HARDIITO')
-    .replace(/\bHOEDION[Q0]\b/i, 'HOEDIONO')
-    .replace(/\bSETE?A\b/i, 'SETIA')
-    .replace(/\bISMATL\b/i, 'ISMAIL')
-    .replace(/\bMANMUDI\b/i, 'MAHMUDI')
-    .replace(/\bMULANNANG\b/i, 'MULIANING')
-    .replace(/\bMARDIAMA\b/i, 'MARDIANA')
-    .replace(/\bNOVANAZIZ\b/i, 'NOVAN AZIZ')
-    .replace(/\bRADER\s*MAKER\b/i, 'RADERMAKER')
-    .replace(/\bAWALUDD[IT]N\b/i, 'AWALUDDIN')
-    .replace(/\bKHABIB[IT]\b/i, 'KHABIBI')
-    .replace(/\bRINE\b/i, 'RINI')
-    .replace(/\bWIDIAS\s*TUTE\b/i, 'WIDIASTUTI')
-    .replace(/\bSOEBAKR[IT]\b/i, 'SOEBAKRI')
-    .replace(/\bSOFYAN\s*PRASTY[Q0]\b/i, 'SOFYAN PRASETYO')
-    .replace(/\bRESITA\s*API?I?ELY\b/i, 'RESITA AFRIELY')
-    .replace(/,\s*SETAN.*$/i, ', SE')
-    .replace(/\bSB\b/g, 'SE')
-    .replace(/\s*,?\s*S[nN]\b.*$/i, ', SE')
-    .replace(/\bSETrrn.*$/i, ', SE')
-    .replace(/\bSE[\w\s]{2,8}$/i, ', SE')
-    .replace(/\bSH[\w\s]{2,8}$/i, ', SH')
-    .replace(/==+.*$/, '')
-    .replace(/[~_\^™\*\?]+.*$/, '')
-    .replace(/[-—~]{2,}.*$/, '')
-    .replace(/[\.\,\-\s]+$/, '')
+  if (typeof raw !== 'string') return '';
+  // Remove only explicit form prefixes and edge noise, never repair spelling,
+  // split joined names, normalize titles, or discard bin/binti patronymics.
+  return raw
+    .replace(/\s+/g, ' ')
+    .replace(/^\s*(?:\d+[.)]\s*)?Nama(?:\s+lengkap)?(?:\s+dan\s+alias(?:nya)?)?\s*[:=]\s*/i, '')
+    .replace(/^[\s: =|_~*•©]+|[\s|_~*•©]+$/g, '')
+    .replace(/^\.{2,}\s*|\s*\.{2,}$/g, '')
     .trim();
-
-  // If text is suspiciously long (> 65 chars) or too short (< 2), it's not a person's name
-  if (str.length > 65 || str.length < 2) return '';
-
-  const lower = str.toLowerCase();
-  for (const kw of BLANGKO_NOISE_KEYWORDS) {
-    if (lower === kw || lower.startsWith(kw + ' ')) return '';
-  }
-
-  // Reject strings with too many digits or symbols
-  if (/\d{2,}/.test(str) || /[\^\*~_]{2,}/.test(str)) return '';
-
-  return str;
 }
 
 /**
  * Direct extraction of person name from a cropped column (Left: Suami, Right: Istri).
- * Isolates the name in < 1ms without false cross-column contamination.
+ * Requires a name label; an arbitrary OCR line is not evidence of a name.
  */
 export function extractNameFromColumnText(text) {
-  if (!text) return '';
-  // 1. Look for name label
-  const labelMatch = text.match(/(?:(?:[1iI\{\|\(\.]\s*)?(?:Nama|[1i]ma)\s*lengkap)[\s\:\.\—\-\©\|]*([^\n\r;]{3,80})/i);
-  if (labelMatch) {
-    let raw = labelMatch[1].replace(/^[^\w]+/, '');
-    raw = raw.split(/(?:\b2\.|Tempat|NIK|Nomor Induk|\r|\n)/i)[0].trim();
-    const cleaned = cleanPersonName(raw);
-    if (cleaned) return cleaned;
-  }
-  // 2. Direct name line before Tempat or NIK
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  for (const line of lines) {
-    if (/(?:SUAMI|ISTERI|ISTRI|Pencatatan|akad)/i.test(line)) continue;
-    if (/(?:Tempat|tanggal lahir|NIK|Kewarganegaraan|Agama|Pekerjaan|Alamat)/i.test(line)) break;
-    const clean = cleanPersonName(line);
-    if (clean && clean.length >= 3 && !BLANGKO_NOISE_KEYWORDS.some(kw => clean.toLowerCase().includes(kw))) {
-      return clean;
-    }
-  }
-  return '';
+  if (typeof text !== 'string') return '';
+  const labelMatch = text.match(/(?:^|\n)[ \t]*(?:[1iI][.)]?[ \t]*)?(?:(?:Nama|Narna|[1i]ma)[ \t]+lengkap\b|Nama(?=[ \t]*[:=]))(?:[ \t]+dan[ \t]+alias(?:nya)?)?[ \t: =.©|—-]*([^\n\r;]*)(?:\r?\n([^\n\r;]*))?/i);
+  if (!labelMatch) return '';
+  const raw = (labelMatch[1].trim() || labelMatch[2] || '')
+    .split(/[ \t]+\d+[.)][ \t]*(?:Tempat|NIK|Nomor[ \t]+Induk|Kewarganegaraan|Agama|Pekerjaan|Alamat)\b/i)[0];
+  // Do not treat the next numbered form field as a missing name's value.
+  if (/^\s*(?:\d+[.)]\s*|(?:Tempat|NIK|Nomor Induk|Kewarganegaraan|Agama|Pekerjaan|Alamat|SUAMI|ISTERI|ISTRI)\b)/i.test(raw)) return '';
+  const cleaned = cleanPersonName(raw);
+  return /\p{L}/u.test(cleaned) ? cleaned : '';
 }
 
 function cleanFieldValue(val) {
@@ -366,53 +207,98 @@ function cleanFieldValue(val) {
     .trim();
 }
 
+const DATE_MONTHS = {
+  januari: 1, jan: 1, februari: 2, pebruari: 2, feb: 2, maret: 3, mar: 3,
+  april: 4, apr: 4, mei: 5, juni: 6, jun: 6, juli: 7, jul: 7,
+  agustus: 8, agu: 8, agt: 8, september: 9, sep: 9, sept: 9,
+  oktober: 10, okt: 10, november: 11, nopember: 11, nov: 11, nop: 11,
+  desember: 12, des: 12
+};
+const DATE_WEEKDAY = "(?:Senin|Selasa|Rabu|Kamis|Jum['’]?at|Sabtu|Ahad|Minggu)";
+
 function normalizeDateString(dateStr) {
-  if (!dateStr) return '';
   const str = dateStr.trim();
-  if (/^\d{2}-\d{2}-\d{4}$/.test(str)) return str;
+  let day, month, year;
+  const iso = str.match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/);
+  const numeric = str.match(/^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$/);
+  const named = str.match(/^(\d{1,2})\s+(?:bulan\s+)?([A-Za-z]+)\s+(?:tahun\s+)?(\d{4})$/i);
+  if (iso) [, year, , month, day] = iso;
+  else if (numeric) [, day, , month, year] = numeric;
+  else if (named) {
+    [, day, month, year] = named;
+    month = DATE_MONTHS[month.toLowerCase()];
+  } else return '';
 
-  const months = {
-    januari: '01', februari: '02', maret: '03', april: '04', mei: '05', juni: '06',
-    juli: '07', agustus: '08', september: '09', oktober: '10', november: '11', nopember: '11', desember: '12'
-  };
+  day = Number(day);
+  month = Number(month);
+  year = Number(year);
+  if (year < 1900 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31) return '';
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';
+  return `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
+}
 
-  // If input is YYYY-MM-DD, convert to DD-MM-YYYY
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-    const [y, m, d] = str.split('-');
-    return `${d}-${m}-${y}`;
+function uniqueMarriageDate(candidates) {
+  // An invalid or conflicting date is not permission to pick another one.
+  if (!candidates.length || candidates.some(date => !date)) return '';
+  const dates = new Set(candidates);
+  return dates.size === 1 ? candidates[0] : '';
+}
+
+function parseMarriageDateValue(value, requireCalendar = false) {
+  const dates = [];
+  const parts = value.trim().replace(/\s+/g, ' ').replace(new RegExp(`^${DATE_WEEKDAY}\\s*,?\\s*`, 'i'), '')
+    .split(/\s*[,;]?\s*(?:bertepatan|bersamaan)\s+dengan\s*/i);
+  for (const part of parts) {
+    const match = part.trim().match(/^(?:tanggal\s+)?(.+?)(?:\s+(Masehi|M|Hijriyah|Hijriah|Hijri|H))?[.,]?$/i);
+    if (!match) return '';
+    const calendar = match[2]?.toLowerCase();
+    if (calendar && /^(?:hijri|h$)/.test(calendar)) {
+      // Retain only an explicitly written Gregorian date; do not convert or
+      // borrow a Hijri day/month/year to complete a damaged Gregorian date.
+      if (!/^(?:\d{1,2}[-/.]){2}\d{4}$|^\d{1,2}\s+(?:bulan\s+)?[A-Za-z]+(?:\s+[A-Za-z]+)?\s+(?:tahun\s+)?\d{4}$/i.test(match[1])) return '';
+      continue;
+    }
+    if (requireCalendar && !calendar) return '';
+    dates.push(normalizeDateString(match[1]));
   }
+  return uniqueMarriageDate(dates);
+}
 
-  const parts = str.split(/[\s\-\/\.]+/).filter(Boolean);
-  if (parts.length === 3) {
-    let day, month, year;
-    if (parts[0].length === 4) {
-      // YYYY-MM-DD
-      year = parts[0];
-      month = parts[1].toLowerCase();
-      day = parts[2].padStart(2, '0');
+function extractMarriageDate(text) {
+  const candidates = [];
+  const labels = /\b(?:(?:Tanggal|Tgl\.?)[ \t]+(?:Akad(?:[ \t]+Nikah)?|Nikah|Perkawinan)|waktu[ \t]+akad[ \t]+nikah[ \t]+dilangsungkan)\b/gi;
+  for (const label of text.matchAll(labels)) {
+    // A field value may start on the next line, but cannot jump another label
+    // or search later lines for a plausible date.
+    const value = text.slice(label.index + label[0].length)
+      .replace(/^[ \t]*[:=]?[ \t]*(?:\n[ \t]*)?/, '')
+      .split(/\n|\b(?:Tanggal|Tgl\.?|Nama|NIK|Tempat|Nomor)\s*(?=[A-Za-z:]|\.)/i)[0]
+      .replace(/[ \t;]+$/, '');
+    candidates.push(parseMarriageDateValue(value));
+  }
+  if (candidates.length && !uniqueMarriageDate(candidates)) return '';
+
+  // Model N registration formula is the only unlabelled header accepted.
+  // Calendar markers and complete date components must be attached, not nearby.
+  const headerDate = 'tanggal\\s+\\d{1,2}\\s+bulan\\s+[A-Za-z]+(?:\\s+[A-Za-z]+)?\\s+tahun\\s+\\d{4}\\s+(?:Masehi|Hijriyah|Hijriah|Hijri)\\b';
+  const headers = new RegExp(`\\bPada\\s+hari(?:\\s+ini)?\\s+${DATE_WEEKDAY}\\s*[,.:]?\\s*(${headerDate}(?:\\s*[,;]?\\s*(?:bertepatan|bersamaan)\\s+dengan\\s+${headerDate})?)`, 'gi');
+  for (const header of text.matchAll(headers)) {
+    const lineStart = text.lastIndexOf('\n', header.index) + 1;
+    const previousLine = text.slice(0, lineStart).trimEnd().split('\n').at(-1) || '';
+    const following = text.slice(header.index + header[0].length)
+      .split(/\n(?=[ \t]*(?:\d+[.)][ \t]*)?(?:Tanggal|Nama|Tempat|SUAMI|ISTERI|ISTRI|WALI|NIK)\b)/i)[0]
+      .split('\n').slice(0, 2).join(' ');
+    const context = text.slice(lineStart, header.index) + ' ' + following;
+    if (/\b(?:pemeriksaan|diperiksa|memeriksa|ujian)\b/i.test(previousLine) ||
+        /\b(?:pemeriksaan|diperiksa|memeriksa|ujian|lahir|kelahiran|dilahirkan)\b/i.test(context)) continue;
+    if (/^[\s,;]*(?:(?:(?:atau|dan)\s+)?(?:tanggal\s+)?\d|(?:bertepatan|bersamaan)\b)/i.test(following)) {
+      candidates.push('');
     } else {
-      // DD-MM-YYYY
-      day = parts[0].padStart(2, '0');
-      month = parts[1].toLowerCase();
-      year = parts[2];
-    }
-
-    if (months[month]) {
-      month = months[month];
-    } else {
-      month = month.padStart(2, '0');
-    }
-
-    if (year.length === 2) {
-      year = parseInt(year, 10) > 40 ? `19${year}` : `20${year}`;
-    }
-
-    if (year.length === 4) {
-      return `${day}-${month}-${year}`;
+      candidates.push(parseMarriageDateValue(header[1], true));
     }
   }
-
-  return str;
+  return uniqueMarriageDate(candidates);
 }
 
 /**
@@ -481,6 +367,14 @@ export async function loadPDFFolder(files, onProgress = null) {
   return loadedDocs;
 }
 
+// Legacy fields may contain fabricated values; retain a backup without making
+// them eligible for hydration or changing their original version.
+function currentExtraction(doc, extracted) {
+  if (extracted?.sourceVersion === 2) return extracted;
+  if (extracted) doc.legacyExtracted ??= extracted;
+  return null;
+}
+
 /**
  * Render a specific PDF document page on demand with caching
  * @param {number} docIndex - 0-based document index
@@ -489,6 +383,7 @@ export async function loadPDFFolder(files, onProgress = null) {
 export async function renderPDFDocPage(docIndex) {
   if (docIndex < 0 || docIndex >= loadedDocs.length) return null;
   const doc = loadedDocs[docIndex];
+  doc.extracted = currentExtraction(doc, doc.extracted);
 
   // 1. Return cached result if available in memory cache
   if (renderCache.has(doc.id)) {
@@ -497,6 +392,7 @@ export async function renderPDFDocPage(docIndex) {
     doc.pageImages = cached.pageImages;
     doc.numPages = cached.numPages;
     doc.rawText = cached.rawText;
+    cached.extracted = doc.extracted ?? currentExtraction(doc, cached.extracted);
     doc.extracted = cached.extracted;
     return cached;
   }
@@ -521,12 +417,14 @@ export async function renderPDFDocPage(docIndex) {
       doc.dataURL = dbCached.dataURL;
       doc.pageImages = dbCached.pageImages || [];
       doc.numPages = dbCached.numPages || 1;
+      doc.rawText = dbCached.rawText || doc.rawText || '';
+      doc.extracted = doc.extracted ?? currentExtraction(doc, dbCached.extracted);
       const res = {
         dataURL: doc.dataURL,
         pageImages: doc.pageImages,
         numPages: doc.numPages,
-        rawText: '',
-        extracted: null
+        rawText: doc.rawText,
+        extracted: doc.extracted
       };
       renderCache.set(doc.id, res);
       return res;
@@ -604,7 +502,12 @@ export async function renderPDFDocPage(docIndex) {
     }
 
     const dataURL = pageImages[0] ? pageImages[0].dataURL : '';
-    let extracted = parseKUAFieldsFromText(combinedRawText, doc.fileName);
+    const extracted = {
+      ...parseKUAFieldsFromText(combinedRawText),
+      sourceVersion: 2,
+      source: 'pdf-text',
+      requiresReview: true
+    };
 
     const result = {
       dataURL,
@@ -629,7 +532,7 @@ export async function renderPDFDocPage(docIndex) {
     renderCache.set(doc.id, result);
 
     // Save rendered image to IndexedDB for instant display on next reload
-    saveRenderedScanToDB(doc.id, dataURL, pageImages, numPages).catch(() => {});
+    saveRenderedScanToDB(doc.id, dataURL, pageImages, numPages, extracted).catch(() => {});
 
     return result;
   } catch (err) {
@@ -763,6 +666,9 @@ export function isPDFLoaded() {
  */
 export function restorePDFDocuments(docs, folderName = '') {
   loadedDocs = docs || [];
+  for (const doc of loadedDocs) {
+    doc.extracted = currentExtraction(doc, doc.extracted);
+  }
   loadedFolderName = folderName || 'Folder PDF';
   renderCache.clear();
   return loadedDocs;

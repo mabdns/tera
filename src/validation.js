@@ -39,7 +39,6 @@ export function calculateSimilarity(str1, str2) {
   const s1 = (str1 ?? '').toString().trim();
   const s2 = (str2 ?? '').toString().trim();
 
-  if (s1 === '' && s2 === '') return 100;
   if (s1 === '' || s2 === '') return 0;
   if (s1.toLowerCase() === s2.toLowerCase()) return 100;
 
@@ -277,6 +276,18 @@ export function normalizeDateToStandard(str) {
   return s.toLowerCase().replace(/\s+/g, '');
 }
 
+// Keep the public normalizer permissive for existing callers; comparisons require a real date.
+function isValidComparisonDate(value) {
+  const numericDate = /^(?:\d{4}([-/.])\d{1,2}\1\d{1,2}|\d{1,2}([-/.])\d{1,2}\2(?:\d{4}|\d{2}))$/;
+  if (!numericDate.test(value)) return false;
+
+  const [day, month, year] = normalizeDateToStandard(value).split('-').map(Number);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
 // Overall Record Evaluator: Compares Book Data (Physical/PDF Scan) with Spreadsheet Data (Entry)
 // Specifically matches ONLY the 4 requested fields:
 // 1. Nomor Akta Nikah (noAkta)
@@ -302,68 +313,59 @@ export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = t
 
     let similarity = 0;
     let diff = [];
-    let status = 'match';
-    let message = '';
-    let severity = 'success';
+    let status;
+    let message;
+    let severity;
 
     if (!isSpreadsheetLoaded) {
-      // Standalone PDF scan mode (no spreadsheet uploaded yet)
-      diff = [{ type: 'same', text: bookVal || '-' }];
-      if (bookVal) {
-        similarity = 100;
+      status = 'pending';
+      message = 'Menunggu spreadsheet untuk perbandingan';
+      severity = 'warning';
+      totalWarnings++;
+    } else if (!bookVal) {
+      status = 'unread';
+      message = entryVal
+        ? 'Data buku belum terbaca (perlu OCR atau input manual)'
+        : 'Data buku belum terbaca dan kolom entry spreadsheet masih kosong';
+      severity = 'warning';
+      totalWarnings++;
+    } else if (!entryVal) {
+      status = 'empty';
+      message = 'Kolom pada entry spreadsheet masih kosong!';
+      severity = 'danger';
+      totalErrors++;
+    } else if (field.key === 'tglAkad' &&
+      (!isValidComparisonDate(bookVal) || !isValidComparisonDate(entryVal))) {
+      status = 'format_error';
+      message = 'Tanggal akad pada buku atau spreadsheet tidak valid (gunakan DD-MM-YYYY atau YYYY-MM-DD)';
+      severity = 'danger';
+      diff = computeCharDiff(bookVal, entryVal);
+      totalErrors++;
+    } else {
+      diff = computeCharDiff(bookVal, entryVal);
+      const isName = field.key === 'namaSuami' || field.key === 'namaIstri';
+      const isEqual = field.key === 'tglAkad'
+        ? normalizeDateToStandard(bookVal) === normalizeDateToStandard(entryVal)
+        : bookVal.toLowerCase() === entryVal.toLowerCase();
+      similarity = isEqual ? 100 : (isName ? calculateSimilarity(bookVal, entryVal) : 0);
+
+      // Similarity is rounded for display; only actual equality establishes a match.
+      if (isEqual) {
         status = 'match';
-        message = 'Data fisik terbaca dari scan buku';
+        message = 'Data cocok 100%';
         severity = 'success';
+        diff = [{ type: 'same', text: entryVal }];
         matchesCount++;
-      } else {
-        similarity = 0;
-        status = 'empty';
-        message = 'Belum terdeteksi dari scan (perlu OCR atau input manual)';
+      } else if (isName && similarity >= 75) {
+        status = 'typo';
+        message = `Terdapat selisih / salah ketik (kemiripan ${similarity}%)`;
         severity = 'warning';
         totalWarnings++;
-      }
-    } else {
-      // Comparison mode with uploaded spreadsheet
-      similarity = calculateSimilarity(bookVal, entryVal);
-      diff = computeCharDiff(bookVal, entryVal);
-
-      // If comparing date field, check semantic date equality across formats
-      if (field.key === 'tglAkad' && bookVal && entryVal) {
-        const normBook = normalizeDateToStandard(bookVal);
-        const normEntry = normalizeDateToStandard(entryVal);
-        if (normBook === normEntry) {
-          similarity = 100;
-          diff = [{ type: 'same', text: entryVal }];
-        }
-      }
-
-      if (!entryVal && bookVal) {
-        status = 'empty';
-        message = 'Kolom pada entry spreadsheet masih kosong!';
+      } else {
+        status = 'mismatch';
+        message = isName ? `Data berbeda (kemiripan ${similarity}%)` : 'Data berbeda';
         severity = 'danger';
         totalErrors++;
-      } else if (bookVal && entryVal) {
-        if (similarity === 100) {
-          status = 'match';
-          message = 'Data cocok 100%';
-          severity = 'success';
-          matchesCount++;
-        } else if (similarity >= 75) {
-          status = 'typo';
-          message = `Terdapat selisih / salah ketik (kemiripan ${similarity}%)`;
-          severity = 'warning';
-          totalWarnings++;
-        } else {
-          status = 'mismatch';
-          message = `Data berbeda (kemiripan ${similarity}%)`;
-          severity = 'danger';
-          totalErrors++;
-        }
-      } else if (!bookVal && !entryVal) {
-        status = 'match';
-        message = 'Kedua data kosong';
-        severity = 'success';
-        matchesCount++;
       }
     }
 
@@ -371,6 +373,8 @@ export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = t
       ...field,
       bookValue: bookVal,
       entryValue: entryVal,
+      missingBook: !bookVal,
+      missingEntry: !entryVal,
       similarity,
       diff,
       status,
@@ -390,6 +394,6 @@ export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = t
     matchesCount,
     totalFields: fields.length,
     overallScore,
-    isClean: totalErrors === 0 && totalWarnings === 0
+    isClean: matchesCount === fields.length
   };
 }

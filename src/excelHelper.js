@@ -174,10 +174,7 @@ export function parseSpreadsheet(arrayBuffer) {
     if (row.every(cell => !cell || cell.toString().trim() === '')) continue;
 
     const entry = {};
-    // Default fallback values
-    entry.noAkta = `042${r}/0${r}/VIII/2026`;
-    entry.hariAkad = 'Sabtu';
-    entry.kuaKecamatan = 'Kantor Urusan Agama Kecamatan';
+
 
     row.forEach((cellValue, colIdx) => {
       const fieldKey = columnMapping[colIdx];
@@ -194,18 +191,19 @@ export function parseSpreadsheet(arrayBuffer) {
       }
     });
 
-    // Provide default book mirror for imported rows if user didn't provide paired book files
-    const bookMirror = { ...entry };
+    // Parsed values are strings, so a frozen shallow copy preserves the import snapshot.
+    const originalEntry = Object.freeze({ ...entry });
 
     parsedRecords.push({
       id: `imported-${r}`,
       no: entry.no || (r - headerRowIndex),
       fileName: entry.fileName || '',
-      noPorporasi: entry.noPorporasi || `SB-990${r}`,
+      noPorporasi: entry.noPorporasi || '',
       statusVerifikasi: 'Belum Diperiksa',
       catatan: 'Diimpor dari file spreadsheet.',
-      book: bookMirror,
-      entry: entry
+      book: {},
+      entry: entry,
+      originalEntry
     });
   }
 

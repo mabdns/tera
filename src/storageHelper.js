@@ -61,40 +61,82 @@ function openDB() {
   });
 }
 
-/**
- * Save current session state into IndexedDB
- */
-export async function saveSessionState(sessionData) {
-  try {
-    const db = await openDB();
-    if (!db) {
-      saveToLocalStorageFallback(sessionData);
-      return;
-    }
+// Keep session metadata JSON-safe so IndexedDB and localStorage store the same data.
+function sanitizeSessionValue(value, ancestors = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'object' || ancestors.has(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return undefined;
 
-    // Sanitize records to ensure clean structured cloning (remove DOM or raw File refs)
-    const sanitizedRecords = (sessionData.records || []).map(r => ({
+  ancestors.add(value);
+  let sanitized;
+  if (Array.isArray(value)) {
+    sanitized = value.map(item => sanitizeSessionValue(item, ancestors) ?? null);
+  } else {
+    sanitized = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'pdfDoc') continue;
+      const clean = sanitizeSessionValue(item, ancestors);
+      if (clean !== undefined) {
+        Object.defineProperty(sanitized, key, { value: clean, enumerable: true, writable: true, configurable: true });
+      }
+    }
+  }
+  ancestors.delete(value);
+  return sanitized;
+}
+
+function serializeSessionState(sessionData) {
+  return sanitizeSessionValue({
+    id: SESSION_KEY,
+    records: (sessionData.records || []).map(r => ({
       id: r.id,
       no: r.no,
       fileName: r.fileName,
       noPorporasi: r.noPorporasi,
       statusVerifikasi: r.statusVerifikasi,
       catatan: r.catatan,
-      book: { ...r.book },
-      entry: { ...r.entry }
-    }));
+      book: r.book || {},
+      entry: r.entry || {},
+      sourceVersion: r.sourceVersion,
+      bookSources: r.bookSources,
+      approval: r.approval,
+      originalEntry: r.originalEntry,
+      changeHistory: r.changeHistory,
+      approvalHistory: r.approvalHistory,
+      previousDocuments: r.previousDocuments,
+      legacySnapshot: r.legacySnapshot,
+      requiresReverification: r.requiresReverification,
+      pairingRequired: r.pairingRequired,
+      extraction: r.extraction
+    })),
+    currentIndex: sessionData.currentIndex || 0,
+    pdfFolderName: sessionData.pdfFolderName || '',
+    spreadsheetFileName: sessionData.spreadsheetFileName || '',
+    spreadsheetLoaded: !!sessionData.spreadsheetLoaded,
+    pdfLoaded: !!sessionData.pdfLoaded,
+    updatedAt: new Date().toISOString(),
+    updatedTimeStr: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  });
+}
 
-    const payload = {
-      id: SESSION_KEY,
-      records: sanitizedRecords,
-      currentIndex: sessionData.currentIndex || 0,
-      pdfFolderName: sessionData.pdfFolderName || '',
-      spreadsheetFileName: sessionData.spreadsheetFileName || '',
-      spreadsheetLoaded: !!sessionData.spreadsheetLoaded,
-      pdfLoaded: !!sessionData.pdfLoaded,
-      updatedAt: new Date().toISOString(),
-      updatedTimeStr: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    };
+function restoreSessionState(payload) {
+  if (!payload?.records?.length) return null;
+  for (const record of payload.records) {
+    if (record.originalEntry) Object.freeze(record.originalEntry);
+  }
+  return payload;
+}
+
+/**
+ * Save current session state into IndexedDB
+ */
+export async function saveSessionState(sessionData) {
+  try {
+    const payload = serializeSessionState(sessionData);
+    const db = await openDB();
+    if (!db) return saveToLocalStorageFallback(payload);
 
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_SESSIONS, 'readwrite');
@@ -123,12 +165,7 @@ export async function loadSessionState() {
       const req = store.get(SESSION_KEY);
 
       req.onsuccess = () => {
-        const res = req.result;
-        if (res && res.records && res.records.length > 0) {
-          resolve(res);
-        } else {
-          resolve(null);
-        }
+        resolve(restoreSessionState(req.result));
       };
 
       req.onerror = (e) => reject(e.target.error);
@@ -343,24 +380,10 @@ export function debouncedAutoSave(sessionData, delayMs = 350, onSavedCallback = 
 }
 
 // LocalStorage Fallback for restricted environments
-function saveToLocalStorageFallback(sessionData) {
+function saveToLocalStorageFallback(payload) {
   try {
-    const sanitized = {
-      records: (sessionData.records || []).slice(0, 300).map(r => ({
-        id: r.id,
-        no: r.no,
-        fileName: r.fileName,
-        statusVerifikasi: r.statusVerifikasi,
-        catatan: r.catatan,
-        book: { ...r.book },
-        entry: { ...r.entry }
-      })),
-      currentIndex: sessionData.currentIndex || 0,
-      pdfFolderName: sessionData.pdfFolderName || '',
-      spreadsheetLoaded: !!sessionData.spreadsheetLoaded,
-      updatedTimeStr: new Date().toLocaleTimeString('id-ID')
-    };
-    localStorage.setItem('verifakta_backup_session', JSON.stringify(sanitized));
+    localStorage.setItem('verifakta_backup_session', JSON.stringify(payload));
+    return payload;
   } catch (e) {
     // ignore
   }
@@ -369,7 +392,7 @@ function saveToLocalStorageFallback(sessionData) {
 function loadFromLocalStorageFallback() {
   try {
     const raw = localStorage.getItem('verifakta_backup_session');
-    return raw ? JSON.parse(raw) : null;
+    return raw ? restoreSessionState(JSON.parse(raw)) : null;
   } catch (e) {
     return null;
   }

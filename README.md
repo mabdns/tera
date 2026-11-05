@@ -5,6 +5,27 @@ Aplikasi web modern yang dirancang khusus untuk memverifikasi, mencocokkan silan
 
 ---
 
+## Verifikasi independen PDF–Excel
+
+- Empat kolom yang dibandingkan: nomor akta, tanggal akad, nama suami, dan nama istri.
+- Excel hanya mengisi referensi; PDF/OCR hanya mengisi hasil pembacaan buku. Impor asli disimpan sebagai `originalEntry`, terpisah dari koreksi petugas.
+- Sertakan kolom **Nama File** berisi nama PDF lengkap (misalnya `1.pdf`) untuk memasangkan baris Excel dengan scan. Nama harus unik pada kedua sumber. Nomor baris dan urutan file tidak digunakan sebagai pengganti pasangan.
+- Data kosong, belum terbaca, tanggal tidak sah, dan pasangan ambigu tidak menghasilkan status sesuai. Skor kesesuaian dihitung dari empat kolom, bukan ukuran akurasi OCR.
+- Hasil OCR tetap menunggu pemeriksaan. Hanya petugas dapat menyetujui setelah empat kolom lengkap dan sesuai; perubahan data atau pembacaan ulang membatalkan persetujuan sebelumnya.
+- Smart Auto Fix serta tombol penyalinan antarsumber dinonaktifkan sementara tanpa mengubah tata letaknya. Koreksi dilakukan dengan membaca scan dan menyunting kolom secara manual.
+- Sesi lama dipertahankan beserta snapshot, tetapi data yang asalnya belum terjamin harus diperiksa ulang. Cache ekstraksi lama tidak digunakan sebagai bukti pembacaan baru.
+- Riwayat koreksi dan persetujuan disimpan lokal. Ini bukan audit terpusat atau log yang tahan manipulasi; identitas petugas terautentikasi belum tersedia.
+
+### Pengujian
+
+```bash
+node --test
+python -m unittest test_ocr_layout.py
+npm run build
+```
+
+Pengujian memakai OCR dan dokumen sintetis/simulasi; akurasi terhadap scan nyata masih perlu diuji dengan transkripsi acuan petugas.
+
 ## ✨ Fitur Utama
 
 ### 1. Dual-Pane Side-by-Side Proofreader
@@ -16,7 +37,7 @@ Aplikasi web modern yang dirancang khusus untuk memverifikasi, mencocokkan silan
 * **Panel Kanan (Formulir Entry & Evaluator Koreksi)**:
   * Penjajaran data per baris: Nilai di Buku Fisik vs Nilai Hasil Ketik Spreadsheet.
   * **Pendeteksi Typo & Fuzzy Matching**: Menghitung skor kemiripan teks (0 - 100%) dan memberikan visualisasi karakter diff (`diff-del` berwarna merah dicoret, `diff-ins` berwarna hijau digarisbawahi).
-  * Tombol **"Samakan"** (1-klik perbaikan per kolom) dan tombol **"Samakan Semua ke Buku"** dengan animasi confetti perayaan.
+  * Tombol **"Samakan"** tetap ditampilkan, tetapi penyalinan antarsumber dinonaktifkan agar bukti PDF tidak diganti dengan referensi Excel.
   * Input langsung yang dapat diedit langsung (*inline editing*).
 
 ### 2. Mesin Validasi Otomatis Regulasi Pernikahan & Administrasi Kependudukan

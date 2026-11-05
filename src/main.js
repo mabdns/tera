@@ -9,8 +9,7 @@ import './style.css';
 import { evaluateRecord } from './validation.js';
 import { renderCertificateSVG } from './certificateRenderer.js';
 import { parseSpreadsheet, exportCorrectedExcel, exportArsipInventarisExcel } from './excelHelper.js';
-import { generateBeritaAcaraHTML } from './reportGenerator.js';
-import { recognizeDocumentText, parseKUAFieldsFromOCR, recognizeMultiPageAkta } from './ocrHelper.js';
+import { recognizeDocumentText, parseKUAFieldsFromOCR, recognizeMultiPageAkta, checkLocalAIService } from './ocrHelper.js';
 import {
   loadPDFFolder,
   renderPDFDocPage,
@@ -23,10 +22,8 @@ import {
   isPDFLoaded,
   clearPDFDocuments,
   getFileNumber,
-  restorePDFDocuments,
-  cleanPersonName
+  restorePDFDocuments
 } from './pdfViewer.js';
-import { getKuaVerifiedRecord } from './kuaDatabase.js';
 import {
   saveSessionState,
   loadSessionState,
@@ -127,7 +124,8 @@ const state = {
   currentIndex: 0,
   filter: 'all', // 'all', 'issues', 'clean'
   searchQuery: '',
-  theme: localStorage.getItem('verifakta-theme') || 'light',
+  proofreadTab: 'table', // 'table' or 'detail'
+  tableFilter: 'all', // 'all', 'issues', 'clean'
 
   // Document Viewer Controls
   zoom: 1,
@@ -225,13 +223,155 @@ function triggerAutoSave() {
   });
 }
 
+const verificationFields = ['noAkta', 'tglAkad', 'namaSuami', 'namaIstri'];
+const sourceVersion = 2;
+
+function hasExtractedFields(data) {
+  return verificationFields.some(key => String(data?.[key] ?? '').trim());
+}
+
+function needsAktaOCR(data) {
+  return verificationFields.some(key => !String(data?.[key] ?? '').trim());
+}
+
+function mergeExtractedData(previous = {}, incoming = {}) {
+  const merged = { ...previous, ...incoming };
+  merged.latestFields = {};
+  for (const key of verificationFields) {
+    const value = String(incoming[key] ?? '').trim();
+    merged.latestFields[key] = incoming.latestFields?.[key] ?? value;
+    merged[key] = value || previous[key] || '';
+  }
+  return merged;
+}
+
+function invalidateApproval(rec, reason) {
+  if (state.filter === 'clean' && getFilteredRecords()[state.currentIndex] === rec) {
+    state.filter = 'all';
+    state.tableFilter = 'all';
+    state.currentIndex = state.records.indexOf(rec);
+  }
+  if (rec.approval) {
+    (rec.approvalHistory ||= []).push({ ...rec.approval, invalidatedAt: new Date().toISOString(), reason });
+    delete rec.approval;
+  }
+  rec.statusVerifikasi = 'Belum Diperiksa';
+}
+
+function recordManualChange(rec, side, key, value) {
+  invalidateApproval(rec, 'Data disunting petugas');
+  const before = rec[side]?.[key] ?? '';
+  (rec[side] ||= {})[key] = value;
+  if (side === 'book') {
+    (rec.bookSources ||= {})[key] = 'manual';
+    if (verificationFields.every(field => rec.bookSources[field])) rec.requiresReverification = false;
+  }
+  (rec.changeHistory ||= []).push({ side, key, before, after: value, source: 'manual', at: new Date().toISOString() });
+}
+
+function evaluateVerification(rec) {
+  const book = rec.requiresReverification
+    ? Object.fromEntries(verificationFields.map(key => [key, rec.bookSources?.[key] ? rec.book?.[key] : '']))
+    : rec.book;
+  return evaluateRecord(rec.pairingRequired ? {} : book, rec.entry, state.spreadsheetLoaded);
+}
+
+function isApproved(rec, result = evaluateVerification(rec)) {
+  const approval = rec.approval;
+  return result.isClean && !rec.requiresReverification && !rec.pairingRequired && rec.statusVerifikasi === 'Valid'
+    && approval?.source === 'manual' && rec.pdfDoc?.id === approval.pdfId
+    && verificationFields.every(key => approval.book?.[key] === rec.book?.[key] && approval.entry?.[key] === rec.entry?.[key]);
+}
+
+function isCurrentDocument(rec, doc) {
+  return state.records.includes(rec) && rec.pdfDoc === doc;
+}
+
+function approveRecord(rec) {
+  if (!rec.pdfDoc || rec.pairingRequired || rec.requiresReverification || !evaluateVerification(rec).isClean) {
+    showNotification('Belum dapat disetujui', 'Pastikan pasangan PDF benar dan keempat kolom telah terbaca, lengkap, serta sesuai dengan Excel.', 'warning');
+    return false;
+  }
+  rec.statusVerifikasi = 'Valid';
+  rec.approval = { at: new Date().toISOString(), source: 'manual', book: { ...rec.book }, entry: { ...rec.entry }, pdfId: rec.pdfDoc.id };
+  triggerAutoSave();
+  return true;
+}
+
+function applyExtractionResult(rec, incoming = {}) {
+  invalidateApproval(rec, 'Pembacaan dokumen diperbarui');
+  const previous = rec.extraction || rec.pdfDoc?.extracted || {};
+  const extracted = { ...mergeExtractedData(previous, incoming), sourceVersion };
+  rec.book ||= {};
+  rec.bookSources ||= {};
+  for (const key of verificationFields) {
+    const value = String(incoming[key] ?? '').trim();
+    if (value && (!rec.book[key] || rec.bookSources[key] === 'ocr' || (rec.requiresReverification && !rec.bookSources[key]))) {
+      rec.book[key] = value;
+      rec.bookSources[key] = 'ocr';
+    }
+  }
+  if (verificationFields.every(key => rec.bookSources[key])) rec.requiresReverification = false;
+  rec.extraction = extracted;
+  rec.sourceVersion = sourceVersion;
+  if (rec.pdfDoc) {
+    rec.pdfDoc.extracted = extracted;
+    rec.pdfDoc.sourceVersion = sourceVersion;
+    saveRenderedScanToDB(rec.pdfDoc.id, rec.pdfDoc.dataURL, rec.pdfDoc.pageImages, rec.pdfDoc.numPages, extracted).catch(() => {});
+  }
+  triggerAutoSave();
+  return hasExtractedFields(incoming);
+}
+
+function renderExtractionReview(extraction, rec) {
+  if (!extraction && !rec?.requiresReverification) return '';
+  const warnings = rec?.requiresReverification ? ['Data sesi lama belum dapat dibuktikan asalnya. Periksa ulang scan atau jalankan OCR.', ...(extraction?.warnings || [])] : (extraction?.warnings || []);
+  return `<div class="legal-alert-box alert-warning"><div><strong>Hasil Ekstraksi — Belum Diperiksa</strong><div>Hasil pembacaan bukan verifikasi atau persetujuan petugas.</div><div>${escapeHTML(extraction?.source || '')}</div>${warnings.map(w => `<div>${escapeHTML(String(w))}</div>`).join('')}<details><summary>Rincian dan saran</summary><pre>${escapeHTML(JSON.stringify({ latestFields: extraction?.latestFields, fieldDetails: extraction?.fieldDetails, timings: extraction?.timings }, null, 2))}</pre></details></div></div>`;
+}
+
+function migrateLegacyRecord(rec) {
+  if (rec.sourceVersion === sourceVersion) return rec;
+  rec.legacySnapshot ||= JSON.parse(JSON.stringify({ book: rec.book, entry: rec.entry, extraction: rec.extraction || rec.pdfDoc?.extracted, statusVerifikasi: rec.statusVerifikasi }));
+  rec.requiresReverification = true;
+  rec.bookSources = {};
+  rec.extraction = { source: 'legacy', requiresReview: true, warnings: ['Sesi lama: sumber data perlu diperiksa ulang.'] };
+  rec.sourceVersion = sourceVersion;
+  invalidateApproval(rec, 'Sesi lama belum memiliki provenance independen');
+  return rec;
+}
+
+function findUniqueDocument(rec, docs) {
+  // Only explicit filenames establish a link; row positions are not document identity.
+  const name = String(rec.entry?.fileName || rec.fileName || rec.pdfDoc?.fileName || '').toLowerCase();
+  if (!name) return null;
+  const matches = docs.filter(doc => doc.fileName.toLowerCase() === name);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function selectTableRecord(index, detail = false) {
+  const rec = state.records[index];
+  const selectedIndex = getFilteredRecords().indexOf(rec);
+  if (selectedIndex < 0) return;
+  state.currentIndex = selectedIndex;
+  if (detail) state.proofreadTab = 'detail';
+  renderAll();
+}
+
+function setRecordFilter(filter) {
+  const selected = getFilteredRecords()[state.currentIndex];
+  state.filter = filter;
+  state.tableFilter = filter;
+  state.currentIndex = Math.max(0, getFilteredRecords().indexOf(selected));
+  renderAll();
+}
+
 // Get Filtered Records based on current tab & search
 function getFilteredRecords() {
   return state.records.filter((rec) => {
     // Filter Tab Match
     if (state.filter !== 'all') {
-      const evalRes = evaluateRecord(rec.book, rec.entry, state.spreadsheetLoaded);
-      const hasIssues = !evalRes.isClean || rec.statusVerifikasi === 'Ada Kesalahan';
+      const evalRes = evaluateVerification(rec);
+      const hasIssues = !isApproved(rec, evalRes);
       if (state.filter === 'issues' && !hasIssues) return false;
       if (state.filter === 'clean' && hasIssues) return false;
     }
@@ -241,13 +381,15 @@ function getFilteredRecords() {
       const q = state.searchQuery.toLowerCase().trim();
       const b = rec.book || {};
       const e = rec.entry || {};
-      const fileName = rec.pdfDoc ? rec.pdfDoc.fileName.toLowerCase() : '';
+      const fileName = String(rec.fileName || rec.pdfDoc?.fileName || '').toLowerCase();
 
       const match =
         fileName.includes(q) ||
         (b.noAkta && b.noAkta.toLowerCase().includes(q)) ||
         (b.namaSuami && b.namaSuami.toLowerCase().includes(q)) ||
         (b.namaIstri && b.namaIstri.toLowerCase().includes(q)) ||
+        (e.noAkta && String(e.noAkta).toLowerCase().includes(q)) ||
+        String(rec.no || '').includes(q) ||
         (e.namaSuami && e.namaSuami.toLowerCase().includes(q)) ||
         (e.namaIstri && e.namaIstri.toLowerCase().includes(q)) ||
         (rec.noPorporasi && rec.noPorporasi.toLowerCase().includes(q));
@@ -266,10 +408,10 @@ function updateStats() {
   let totalScoreSum = 0;
 
   state.records.forEach(rec => {
-    const evalRes = evaluateRecord(rec.book, rec.entry, state.spreadsheetLoaded);
+    const evalRes = evaluateVerification(rec);
     totalScoreSum += evalRes.overallScore;
 
-    if (evalRes.isClean && rec.statusVerifikasi !== 'Ada Kesalahan') {
+    if (isApproved(rec, evalRes)) {
       cleanCount++;
     } else {
       issuesCount++;
@@ -279,12 +421,12 @@ function updateStats() {
   const avgAccuracy = total > 0 ? Math.round(totalScoreSum / total) : 0;
 
   document.getElementById('stat-total').innerText = total;
-  document.getElementById('stat-errors').innerText = state.spreadsheetLoaded ? issuesCount : 0;
+  document.getElementById('stat-errors').innerText = issuesCount;
   document.getElementById('stat-clean').innerText = cleanCount;
-  document.getElementById('stat-accuracy').innerText = state.spreadsheetLoaded ? `${avgAccuracy}%` : `${avgAccuracy}% (Fisik)`;
+  document.getElementById('stat-accuracy').innerText = state.spreadsheetLoaded ? `${avgAccuracy}%` : 'Belum dibandingkan';
 
   document.getElementById('count-all').innerText = total;
-  document.getElementById('count-issues').innerText = state.spreadsheetLoaded ? issuesCount : 0;
+  document.getElementById('count-issues').innerText = issuesCount;
   document.getElementById('count-clean').innerText = cleanCount;
 }
 
@@ -441,33 +583,18 @@ function renderScanDocument(target, pdfDoc) {
 // Fast On-Demand targeted OCR for active document (runs in ~1s via ROI crops)
 let isFastOCROngoing = false;
 function triggerFastOnDemandOCR(currentRec, pdfDoc, originalIndex) {
-  if (!currentRec || !pdfDoc || state.spreadsheetLoaded || isFastOCROngoing) return;
-  const isBirthYear = currentRec.book.tglAkad && (currentRec.book.tglAkad.endsWith('1988') || currentRec.book.tglAkad.endsWith('1989') || currentRec.book.tglAkad.endsWith('1959') || currentRec.book.tglAkad.endsWith('1991') || currentRec.book.tglAkad.endsWith('1995') || currentRec.book.tglAkad.endsWith('1990') || currentRec.book.tglAkad.endsWith('1954'));
-  const needsOCR = !currentRec.book.namaSuami || !currentRec.book.namaIstri || !currentRec.book.noAkta || !currentRec.book.tglAkad || isBirthYear;
-  if (!needsOCR) return;
+  if (!currentRec || !pdfDoc || isFastOCROngoing || pdfDoc.ocrAttempted) return;
+  if (!currentRec.requiresReverification && !needsAktaOCR(currentRec.book)) return;
+  pdfDoc.ocrAttempted = true;
 
   isFastOCROngoing = true;
   recognizeMultiPageAkta(pdfDoc).then(ext => {
     isFastOCROngoing = false;
-    if (ext && (ext.noAkta || ext.namaSuami || ext.namaIstri || ext.tglAkad)) {
-      let ocrChanged = false;
-      if (ext.noAkta && currentRec.book.noAkta !== ext.noAkta) { currentRec.book.noAkta = ext.noAkta; ocrChanged = true; }
-      if (ext.tglAkad && (currentRec.book.tglAkad !== ext.tglAkad || isBirthYear)) { currentRec.book.tglAkad = ext.tglAkad; ocrChanged = true; }
-      if (ext.namaSuami && currentRec.book.namaSuami !== ext.namaSuami) { currentRec.book.namaSuami = ext.namaSuami; ocrChanged = true; }
-      if (ext.namaIstri && currentRec.book.namaIstri !== ext.namaIstri) { currentRec.book.namaIstri = ext.namaIstri; ocrChanged = true; }
-
-      if (ocrChanged) {
-        if (currentRec.book.noAkta && currentRec.book.tglAkad) {
-          currentRec.statusVerifikasi = 'Sesuai / Valid';
-        }
-        pdfDoc.extracted = { ...(pdfDoc.extracted || {}), ...ext };
-        saveRenderedScanToDB(pdfDoc.id, pdfDoc.dataURL, pdfDoc.pageImages, pdfDoc.numPages, pdfDoc.extracted).catch(() => {});
-        if (state.currentIndex === originalIndex) {
-          renderProofreadingInspector();
-          updateStats();
-        }
-        triggerAutoSave();
-      }
+    if (!isCurrentDocument(currentRec, pdfDoc)) return;
+    applyExtractionResult(currentRec, ext || {});
+    if (getFilteredRecords()[state.currentIndex] === currentRec) {
+      renderProofreadingInspector();
+      updateStats();
     }
   }).catch(err => {
     isFastOCROngoing = false;
@@ -504,7 +631,11 @@ function renderDocumentViewer() {
 
   // Check if PDF documents are loaded
   if (state.pdfLoaded && state.pdfDocuments.length > 0) {
-    const pdfDoc = currentRec.pdfDoc || state.pdfDocuments[originalIndex] || state.pdfDocuments[0];
+    const pdfDoc = currentRec.pdfDoc;
+    if (!pdfDoc) {
+      target.innerHTML = '<div style="padding: 2rem;">Belum ada pasangan PDF yang pasti. Isi nama file PDF pada spreadsheet lalu unggah ulang; pencocokan berdasarkan urutan dinonaktifkan.</div>';
+      return;
+    }
 
     if (subtoolbar) {
       subtoolbar.style.display = 'flex';
@@ -535,7 +666,7 @@ function renderDocumentViewer() {
     if (pdfDoc && (pdfDoc.dataURL || (pdfDoc.pageImages && pdfDoc.pageImages.length > 0))) {
       renderScanDocument(target, pdfDoc);
       // Pre-render next document silently in background
-      preRenderAdjacentDoc(originalIndex);
+      preRenderAdjacentDoc(pdfDoc.index);
       // Fast targeted On-Demand OCR if fields are missing or have birth dates
       triggerFastOnDemandOCR(currentRec, pdfDoc, originalIndex);
     } else if (pdfDoc) {
@@ -549,56 +680,27 @@ function renderDocumentViewer() {
       `;
 
       // Render on demand
-      renderPDFDocPage(originalIndex).then((res) => {
+      renderPDFDocPage(pdfDoc.index).then((res) => {
         // Confirm user hasn't switched away while rendering
-        if (state.currentIndex === originalIndex && res) {
+        if (getFilteredRecords()[state.currentIndex] === currentRec && currentRec.pdfDoc === pdfDoc && res) {
           renderScanDocument(target, pdfDoc);
           applyViewerTransform();
 
-          // User explicit requirement: "yang saya inginkan itu buku scan akta disamakan dengan entry spreadsheetnya yang telah dimasukkan, bukan sebaliknya"
-          // If spreadsheet data is present, NEVER overwrite book fields with raw PDF text extraction.
-          if (state.spreadsheetLoaded) {
-            // Keep book synchronized with entry spreadsheet
-            if (!currentRec.book.noAkta && currentRec.entry.noAkta) currentRec.book.noAkta = currentRec.entry.noAkta;
-            if (!currentRec.book.tglAkad && currentRec.entry.tglAkad) currentRec.book.tglAkad = currentRec.entry.tglAkad;
-            if (!currentRec.book.namaSuami && currentRec.entry.namaSuami) currentRec.book.namaSuami = currentRec.entry.namaSuami;
-            if (!currentRec.book.namaIstri && currentRec.entry.namaIstri) currentRec.book.namaIstri = currentRec.entry.namaIstri;
-          } else {
-            // Standalone PDF scan mode (no spreadsheet)
-            let changed = false;
-
-            // 1. Direct text extraction from PDF.js if available
-            if (res.extracted) {
-              if (res.extracted.noAkta && !currentRec.book.noAkta) { currentRec.book.noAkta = res.extracted.noAkta; changed = true; }
-              if (res.extracted.tglAkad && !currentRec.book.tglAkad) { currentRec.book.tglAkad = res.extracted.tglAkad; changed = true; }
-              if (res.extracted.namaSuami && !currentRec.book.namaSuami) { currentRec.book.namaSuami = res.extracted.namaSuami; changed = true; }
-              if (res.extracted.namaIstri && !currentRec.book.namaIstri) { currentRec.book.namaIstri = res.extracted.namaIstri; changed = true; }
-            }
-
-            // 2. Check cached extracted data on pdfDoc
-            if (pdfDoc.extracted) {
-              if (pdfDoc.extracted.noAkta && !currentRec.book.noAkta) { currentRec.book.noAkta = pdfDoc.extracted.noAkta; changed = true; }
-              if (pdfDoc.extracted.tglAkad && !currentRec.book.tglAkad) { currentRec.book.tglAkad = pdfDoc.extracted.tglAkad; changed = true; }
-              if (pdfDoc.extracted.namaSuami && !currentRec.book.namaSuami) { currentRec.book.namaSuami = pdfDoc.extracted.namaSuami; changed = true; }
-              if (pdfDoc.extracted.namaIstri && !currentRec.book.namaIstri) { currentRec.book.namaIstri = pdfDoc.extracted.namaIstri; changed = true; }
-            }
-
-            if (changed) {
-              renderProofreadingInspector();
-              updateStats();
-            }
-
-            // 3. Fast targeted On-Demand OCR
-            triggerFastOnDemandOCR(currentRec, pdfDoc, originalIndex);
+          if (res.extracted && res.extracted.sourceVersion === sourceVersion) {
+            applyExtractionResult(currentRec, res.extracted);
+            renderProofreadingInspector();
+            updateStats();
           }
+          triggerFastOnDemandOCR(currentRec, pdfDoc, originalIndex);
 
           // Pre-render next page
-          preRenderAdjacentDoc(originalIndex);
+          preRenderAdjacentDoc(pdfDoc.index);
           // Persist rendered scan to IndexedDB
           saveRenderedScanToDB(pdfDoc.id, res.dataURL, res.pageImages, res.numPages, pdfDoc.extracted).catch(() => {});
         }
       }).catch((err) => {
-        target.innerHTML = `<div style="color: var(--danger-600); padding: 2.5rem; text-align: center;">Gagal membaca berkas ${pdfDoc.fileName}: ${err.message}</div>`;
+        if (getFilteredRecords()[state.currentIndex] !== currentRec || currentRec.pdfDoc !== pdfDoc) return;
+        target.innerHTML = `<div style="color: var(--danger-600); padding: 2.5rem; text-align: center;">Gagal membaca berkas ${escapeHTML(pdfDoc.fileName)}: ${escapeHTML(err.message)}</div>`;
       });
     }
   } else if (state.pdfFolderName) {
@@ -670,21 +772,349 @@ function applyViewerTransform() {
   else if (state.contrastMode === 3) wrapper.classList.add('filter-grayscale');
 }
 
-// Render Proofreading Inspector (Right Side)
+// Master Proofreading Inspector Controller (Switches between Table View and Detail Form View)
 function renderProofreadingInspector() {
+  const tabBtnTable = document.getElementById('tab-btn-table');
+  const tabBtnDetail = document.getElementById('tab-btn-detail');
+  const tableBadge = document.getElementById('table-tab-badge');
+
+  if (tabBtnTable && tabBtnDetail) {
+    if (state.proofreadTab === 'table') {
+      tabBtnTable.classList.add('active');
+      tabBtnDetail.classList.remove('active');
+    } else {
+      tabBtnDetail.classList.add('active');
+      tabBtnTable.classList.remove('active');
+    }
+  }
+
+  // Count issues across all records for the badge
+  let totalIssues = 0;
+  state.records.forEach(r => {
+    const ev = evaluateVerification(r);
+    if (!isApproved(r, ev)) {
+      totalIssues++;
+    }
+  });
+
+  if (tableBadge) {
+    if (totalIssues > 0) {
+      tableBadge.style.display = 'inline-block';
+      tableBadge.innerText = totalIssues;
+    } else {
+      tableBadge.style.display = 'none';
+    }
+  }
+
+  if (state.proofreadTab === 'table') {
+    renderProofreadingTable();
+  } else {
+    renderProofreadingDetail();
+  }
+}
+
+// ============================================================
+// Proofreading Mode 1: Table View (Rekap Kolom & Baris)
+// ============================================================
+function renderProofreadingTable() {
+  const container = document.getElementById('proofread-content');
+  if (!container) return;
+
+  const existingScrollContainer = container.querySelector('.proofread-table-container');
+  const savedScrollTop = existingScrollContainer ? existingScrollContainer.scrollTop : 0;
+  const savedScrollLeft = existingScrollContainer ? existingScrollContainer.scrollLeft : 0;
+
+  if (state.records.length === 0) {
+    container.innerHTML = `
+      <div style="text-align: center; padding: 3.5rem 1.5rem; color: var(--text-muted);">
+        <i data-lucide="sheet" style="width: 48px; height: 48px; margin: 0 auto 1rem; opacity: 0.45; color: var(--primary-600);"></i>
+        <div style="font-size: 1.15rem; font-weight: 800; color: var(--text-main);">Tabel Dokumen Belum Dimuat</div>
+        <p style="font-size: 0.85rem; margin-top: 0.5rem; max-width: 440px; margin-left: auto; margin-right: auto; line-height: 1.55;">
+          Silakan klik <strong>Unggah Data / Scan</strong> untuk memilih folder berkas scan PDF dan spreadsheet Excel buku akta nikah.
+        </p>
+      </div>
+    `;
+    refreshIcons();
+    return;
+  }
+
+  // Compute stats for table filter pills
+  let issuesCount = 0;
+  let cleanCount = 0;
+  state.records.forEach(r => {
+    const ev = evaluateVerification(r);
+    if (!isApproved(r, ev)) issuesCount++;
+    else cleanCount++;
+  });
+
+  const curFilter = state.filter || 'all';
+  const displayedRecords = getFilteredRecords();
+
+  const selectedRec = getFilteredRecords()[state.currentIndex];
+  const selectedEv = selectedRec ? evaluateVerification(selectedRec) : null;
+
+  // Build Table Rows
+  const tableRowsHTML = displayedRecords.map(rec => {
+    const origIdx = state.records.indexOf(rec);
+    const isSelected = rec === selectedRec;
+    const ev = evaluateVerification(rec);
+
+    let rowClass = 'doc-table-row';
+    if (isSelected) rowClass += ' row-active';
+    if (state.spreadsheetLoaded) {
+      if (!isApproved(rec, ev)) rowClass += ' row-issues';
+      else rowClass += ' row-clean';
+    }
+
+    // Status Badge
+    let statusBadgeHTML = '';
+    if (!state.spreadsheetLoaded) {
+      statusBadgeHTML = `<span class="status-cell-badge" style="background: rgba(14, 165, 233, 0.1); color: #0284c7;"><i data-lucide="scan" style="width: 12px; height: 12px;"></i> Belum Diperiksa</span>`;
+    } else if (rec.pairingRequired) {
+      statusBadgeHTML = `<span class="status-cell-badge warning">Belum dipasangkan</span>`;
+    } else if (rec.requiresReverification || ev.evaluations.some(field => field.status === 'unread')) {
+      statusBadgeHTML = `<span class="status-cell-badge warning">Belum terbaca</span>`;
+    } else if (ev.evaluations.some(field => field.status === 'empty')) {
+      statusBadgeHTML = `<span class="status-cell-badge warning">Belum lengkap</span>`;
+    } else if (ev.totalErrors > 0) {
+      statusBadgeHTML = `<span class="status-cell-badge issues"><i data-lucide="alert-triangle" style="width: 12px; height: 12px;"></i> ${ev.totalErrors} Selisih</span>`;
+    } else if (ev.totalWarnings > 0) {
+      statusBadgeHTML = `<span class="status-cell-badge warning"><i data-lucide="alert-circle" style="width: 12px; height: 12px;"></i> Typo</span>`;
+    } else {
+      statusBadgeHTML = `<span class="status-cell-badge ${isApproved(rec, ev) ? 'clean' : 'warning'}"><i data-lucide="check" style="width: 12px; height: 12px;"></i> ${isApproved(rec, ev) ? 'Disetujui' : 'Sesuai · Belum Diperiksa'}</span>`;
+    }
+
+    // Helper for rendering cell comparison (Scan vs Excel)
+    const renderCellVal = (bookVal, entryVal, fieldKey) => {
+      const bStr = (bookVal || '').trim();
+      const eStr = (entryVal || '').trim();
+
+      if (!state.spreadsheetLoaded) {
+        return bStr
+          ? `<span class="val-buku">${escapeHTML(bStr)}</span>`
+          : `<span class="val-buku-empty">-</span>`;
+      }
+
+      const isMatch = ev.evaluations.find(field => field.key === fieldKey)?.status === 'match';
+
+      if (isMatch) {
+        return `<span class="val-buku" style="color: var(--primary-700); font-weight: 600;">${escapeHTML(eStr || bStr || '-')}</span>`;
+      }
+
+      return `
+        <div class="table-cell-val">
+          <div style="font-size: 0.68rem; color: var(--text-muted);">
+            Scan: <strong style="color: var(--text-main);">${escapeHTML(bStr || '(Kosong)')}</strong>
+          </div>
+          <div style="font-size: 0.72rem; color: var(--danger-600); font-weight: 700;">
+            Excel: <span class="val-diff-tag">${escapeHTML(eStr || '(Kosong)')}</span>
+          </div>
+        </div>
+      `;
+    };
+
+    return `
+      <tr class="${rowClass}" data-record-index="${origIdx}" title="Klik baris ini untuk membuka scan PDF Dokumen #${rec.no || origIdx + 1} di panel kiri">
+        <td style="text-align: center; width: 55px;">
+          <span class="doc-no-pill">#${rec.no || origIdx + 1}</span>
+        </td>
+        <td style="white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis;">
+          <div style="font-weight: 700; color: var(--primary-700); font-size: 0.76rem;">
+            📄 ${escapeHTML(rec.fileName || rec.pdfDoc?.fileName || `Akta ${origIdx + 1}`)}
+          </div>
+        </td>
+        <td>
+          ${renderCellVal(rec.book?.noAkta, rec.entry?.noAkta, 'noAkta')}
+        </td>
+        <td>
+          ${renderCellVal(rec.book?.tglAkad, rec.entry?.tglAkad, 'tglAkad')}
+        </td>
+        <td>
+          ${renderCellVal(rec.book?.namaSuami, rec.entry?.namaSuami, 'namaSuami')}
+        </td>
+        <td>
+          ${renderCellVal(rec.book?.namaIstri, rec.entry?.namaIstri, 'namaIstri')}
+        </td>
+        <td style="text-align: center; width: 110px;">
+          ${statusBadgeHTML}
+        </td>
+        <td style="text-align: center; width: 110px;">
+          <button class="btn-open-scan-row" data-action="inspect" data-record-index="${origIdx}" title="Buka berkas ini di panel kiri dan tampilkan formulir detail">
+            <i data-lucide="scan" style="width: 12px; height: 12px;"></i>
+            <span>Periksa 🔍</span>
+          </button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="proofread-table-view">
+      <!-- Sub-Bar: Filter Pills & Hint -->
+      <div class="table-subbar">
+        <div class="table-filter-pills">
+          <button class="table-filter-btn ${curFilter === 'all' ? 'active' : ''}" data-table-filter="all">
+            Semua Dokumen (${state.records.length})
+          </button>
+          <button class="table-filter-btn filter-issues ${curFilter === 'issues' ? 'active' : ''}" data-table-filter="issues" style="${issuesCount > 0 ? 'color: var(--danger-600); font-weight: 700;' : ''}">
+            🔴 Ada Selisih / Typo (${issuesCount})
+          </button>
+          <button class="table-filter-btn ${curFilter === 'clean' ? 'active' : ''}" data-table-filter="clean">
+            🟢 Valid / Cocok (${cleanCount})
+          </button>
+        </div>
+
+        <div class="table-info-hint">
+          <i data-lucide="info" style="width: 14px; height: 14px; color: var(--accent-gold); flex-shrink: 0;"></i>
+          <span>Klik baris untuk merujuk ke scan PDF di panel kiri. Termasuk hasil OCR yang belum diperiksa.</span>
+        </div>
+      </div>
+
+      <!-- Table Container -->
+      <div class="proofread-table-container">
+        <table class="proofread-doc-table">
+          <thead>
+            <tr>
+              <th style="width: 55px; text-align: center;">No</th>
+              <th style="min-width: 110px;">Berkas Scan</th>
+              <th style="min-width: 120px;">No. Akta Nikah</th>
+              <th style="min-width: 100px;">Tgl Akad</th>
+              <th style="min-width: 130px;">Pengantin Pria</th>
+              <th style="min-width: 130px;">Pengantin Wanita</th>
+              <th style="width: 110px; text-align: center;">Status</th>
+              <th style="width: 110px; text-align: center;">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${displayedRecords.length > 0 ? tableRowsHTML : `
+              <tr>
+                <td colspan="8" style="text-align: center; padding: 2.5rem 1rem; color: var(--text-muted);">
+                  Tidak ada dokumen yang cocok dengan filter "${curFilter}".
+                </td>
+              </tr>
+            `}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Selected Document Floating Banner -->
+      ${selectedRec ? `
+        <div class="selected-doc-action-card">
+          <div style="display: flex; align-items: center; gap: 0.65rem; min-width: 0;">
+            <span class="doc-no-pill" style="background: var(--primary-50); color: var(--primary-700); font-size: 0.82rem; border-color: rgba(16, 185, 129, 0.3);">
+              #${selectedRec.no || state.currentIndex + 1}
+            </span>
+            <div style="min-width: 0;">
+              <div style="font-weight: 700; font-size: 0.84rem; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                Dokumen Terpilih: <strong>${escapeHTML(selectedRec.fileName || selectedRec.pdfDoc?.fileName || `Akta ${state.currentIndex + 1}`)}</strong>
+                ${selectedRec.entry?.noAkta ? `(${escapeHTML(selectedRec.entry.noAkta)})` : ''}
+              </div>
+              <div style="font-size: 0.74rem; color: var(--text-muted);">
+                ${selectedEv && !selectedEv.isClean
+                  ? `<span style="color: var(--danger-600); font-weight: 700;">⚠️ Terdapat ${selectedEv.totalErrors + selectedEv.totalWarnings} perbedaan antara scan fisik buku dan spreadsheet.</span>`
+                  : `<span style="color: var(--primary-600); font-weight: 600;">✓ Data buku scan dan spreadsheet telah sesuai 100%.</span>`}
+              </div>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" id="btn-open-selected-detail" style="font-size: 0.78rem; padding: 0.4rem 0.85rem; flex-shrink: 0;">
+            <i data-lucide="clipboard-check" style="width: 14px; height: 14px;"></i>
+            <span>Buka Formulir Detail Koreksi</span>
+          </button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  // Attach Table Row Click Listeners (Instant sync to left scan PDF viewer)
+  container.querySelectorAll('.doc-table-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      const idx = parseInt(row.getAttribute('data-record-index'), 10);
+      if (!isNaN(idx) && idx >= 0 && idx < state.records.length) {
+        const filteredIndex = getFilteredRecords().indexOf(state.records[idx]);
+        if (filteredIndex < 0) return;
+        state.currentIndex = filteredIndex;
+        renderDocumentViewer();
+        renderNavigation();
+
+        if (e.target.closest('.btn-open-scan-row')) {
+          state.proofreadTab = 'detail';
+          renderProofreadingInspector();
+        } else {
+          // Update active styling directly without resetting table scroll position!
+          container.querySelectorAll('.doc-table-row').forEach(r => r.classList.remove('row-active'));
+          row.classList.add('row-active');
+
+          const card = container.querySelector('.selected-doc-action-card');
+          if (card) {
+            const selectedRec = state.records[idx];
+            const selectedEv = selectedRec ? evaluateVerification(selectedRec) : null;
+            const noPill = card.querySelector('.doc-no-pill');
+            if (noPill) noPill.textContent = `#${selectedRec.no || idx + 1}`;
+            const titleEl = card.querySelector('div[style*="font-weight: 700"]');
+            if (titleEl) {
+              titleEl.innerHTML = `Dokumen Terpilih: <strong>${escapeHTML(selectedRec.fileName || selectedRec.pdfDoc?.fileName || `Akta ${idx + 1}`)}</strong> ${selectedRec.entry?.noAkta ? `(${escapeHTML(selectedRec.entry.noAkta)})` : ''}`;
+            }
+            const descEl = card.querySelector('div[style*="font-size: 0.74rem"]');
+            if (descEl) {
+              descEl.innerHTML = selectedEv && !selectedEv.isClean
+                ? `<span style="color: var(--danger-600); font-weight: 700;">⚠️ Terdapat ${selectedEv.totalErrors + selectedEv.totalWarnings} perbedaan antara scan fisik buku dan spreadsheet.</span>`
+                : `<span style="color: var(--primary-600); font-weight: 600;">✓ Data buku scan dan spreadsheet telah sesuai 100%.</span>`;
+            }
+          }
+        }
+      }
+    });
+
+    row.addEventListener('dblclick', () => {
+      const idx = parseInt(row.getAttribute('data-record-index'), 10);
+      if (!isNaN(idx)) {
+        selectTableRecord(idx, true);
+      }
+    });
+  });
+
+  // Attach Filter Button Listeners
+  container.querySelectorAll('.table-filter-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const f = btn.getAttribute('data-table-filter');
+      setRecordFilter(f);
+    });
+  });
+
+  // Attach Open Selected Detail Button
+  const btnOpenDetail = document.getElementById('btn-open-selected-detail');
+  if (btnOpenDetail) {
+    btnOpenDetail.addEventListener('click', () => {
+      state.proofreadTab = 'detail';
+      renderProofreadingInspector();
+    });
+  }
+
+  // Restore scroll position after table render
+  const newScrollContainer = container.querySelector('.proofread-table-container');
+  if (newScrollContainer) {
+    newScrollContainer.scrollTop = savedScrollTop;
+    newScrollContainer.scrollLeft = savedScrollLeft;
+  }
+
+  refreshIcons();
+}
+
+// ============================================================
+// Proofreading Mode 2: Detail Form View (Formulir Periksa & Koreksi)
+// ============================================================
+function renderProofreadingDetail() {
   const container = document.getElementById('proofread-content');
   const filtered = getFilteredRecords();
 
-  if (filtered.length === 0) {
-    const emptyTitle = state.records.length === 0 ? 'Formulir Siap Digunakan' : 'Tidak ada data ditemukan';
-    const emptyDesc = state.records.length === 0
-      ? 'Unggah berkas scan PDF atau spreadsheet untuk memulai proofreading dan validasi akta nikah.'
-      : 'Coba sesuaikan kata kunci pencarian atau ganti filter.';
+  if (filtered.length === 0 || state.records.length === 0) {
     container.innerHTML = `
       <div style="text-align: center; padding: 3rem 1rem; color: var(--text-muted);">
-        <i data-lucide="${state.records.length === 0 ? 'upload' : 'search'}" style="width: 48px; height: 48px; margin: 0 auto 1rem; opacity: 0.5;"></i>
-        <div style="font-size: 1.1rem; font-weight: bold;">${emptyTitle}</div>
-        <p style="font-size: 0.85rem; margin-top: 0.5rem;">${emptyDesc}</p>
+        <i data-lucide="search" style="width: 48px; height: 48px; margin: 0 auto 1rem; opacity: 0.5;"></i>
+        <div style="font-size: 1.1rem; font-weight: bold;">Tidak ada data ditemukan</div>
+        <p style="font-size: 0.85rem; margin-top: 0.5rem;">Coba sesuaikan kata kunci pencarian atau ganti filter.</p>
       </div>
     `;
     refreshIcons();
@@ -692,7 +1122,8 @@ function renderProofreadingInspector() {
   }
 
   const currentRec = filtered[state.currentIndex];
-  const evalRes = evaluateRecord(currentRec.book, currentRec.entry, state.spreadsheetLoaded);
+  if (!currentRec) return;
+  const evalRes = evaluateVerification(currentRec);
 
   // Group by category (Identitas Akta & Data Pengantin)
   const categories = {};
@@ -704,7 +1135,7 @@ function renderProofreadingInspector() {
 
   // Status Banner styling
   let bannerClass = 'status-clean';
-  let badgeIndicator = '<span class="status-badge-indicator success"><i data-lucide="check" style="width: 14px; height: 14px;"></i> Data Cocok / Selesai Diperbaiki</span>';
+  let badgeIndicator = '<span class="status-badge-indicator success"><i data-lucide="check" style="width: 14px; height: 14px;"></i> Sesuai — Menunggu Persetujuan Petugas</span>';
 
   if (!state.spreadsheetLoaded) {
     bannerClass = 'status-clean';
@@ -713,6 +1144,9 @@ function renderProofreadingInspector() {
         <i data-lucide="scan" style="width: 14px; height: 14px;"></i> Mode Pindaian Scan Berkas (${state.pdfDocuments.length || state.records.length} Berkas)
       </span>
     `;
+  } else if (currentRec.pairingRequired) {
+    bannerClass = 'status-warning';
+    badgeIndicator = '<span class="status-badge-indicator warning">Belum ada pasangan PDF–Excel yang pasti</span>';
   } else if (evalRes.totalErrors > 0) {
     bannerClass = 'status-danger';
     badgeIndicator = `<span class="status-badge-indicator danger"><i data-lucide="alert-triangle" style="width: 14px; height: 14px;"></i> Terdapat ${evalRes.totalErrors} Kesalahan</span>`;
@@ -722,7 +1156,7 @@ function renderProofreadingInspector() {
   }
 
   // Cross-Field Legal Alerts
-  const legalAlertsHTML = state.spreadsheetLoaded ? evalRes.crossFieldNotes.map(n => `
+  const legalAlertsHTML = renderExtractionReview(currentRec.extraction || currentRec.pdfDoc?.extracted, currentRec) + (state.spreadsheetLoaded ? evalRes.crossFieldNotes.map(n => `
     <div class="legal-alert-box ${n.type === 'danger' ? 'alert-danger' : 'alert-warning'}">
       <i data-lucide="${n.type === 'danger' ? 'alert-triangle' : 'alert-circle'}" style="width: 20px; height: 20px; flex-shrink: 0; margin-top: 2px;"></i>
       <div>
@@ -730,9 +1164,9 @@ function renderProofreadingInspector() {
         <div>${n.message}</div>
       </div>
     </div>
-  `).join('') : '';
+  `).join('') : '');
 
-  // Source info banner (shows PDF file name if read from PDF)
+  // Source info banner
   let docSourceBadge = '';
   if (currentRec.pdfDoc) {
     docSourceBadge = `
@@ -742,12 +1176,10 @@ function renderProofreadingInspector() {
           <span>Berkas PDF: <strong>${escapeHTML(currentRec.pdfDoc.fileName)}</strong> (Akta ${state.currentIndex + 1} dari ${state.records.length}${currentRec.pdfDoc.numPages > 1 ? ` • ${currentRec.pdfDoc.numPages} Scan Halaman` : ''})</span>
         </div>
         <div style="display: flex; align-items: center; gap: 0.65rem;">
-          ${!state.spreadsheetLoaded ? `
           <button class="btn btn-secondary" id="btn-trigger-single-ocr" style="padding: 2px 8px; font-size: 0.72rem;" title="Pindai ulang dokumen ini dengan OCR">
             <i data-lucide="scan-text" style="width: 12px; height: 12px; color: var(--primary-600);"></i>
             <span>Pindai OCR</span>
           </button>
-          ` : ''}
           <span style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600;">Ukuran: ${currentRec.pdfDoc.fileSize}</span>
         </div>
       </div>
@@ -767,7 +1199,7 @@ function renderProofreadingInspector() {
           if (state.spreadsheetLoaded) {
             if (f.status === 'typo') rowClass += ' row-typo';
             else if (f.status === 'mismatch' || f.status === 'format_error') rowClass += ' row-mismatch';
-            else if (f.status === 'empty') rowClass += ' row-empty';
+            else if (f.status === 'empty' || f.status === 'unread' || f.status === 'pending') rowClass += ' row-empty';
           }
 
           const inputClass = state.spreadsheetLoaded && (f.status === 'format_error' || f.status === 'mismatch' || f.status === 'empty')
@@ -788,12 +1220,12 @@ function renderProofreadingInspector() {
                 <span class="similarity-badge ${f.similarity === 100 ? 'sim-100' : f.similarity >= 75 ? 'sim-warning' : 'sim-danger'}">
                   ${!state.spreadsheetLoaded
                     ? (f.bookValue ? '✓ Terbaca dari Scan' : '⏳ Belum Terdeteksi')
-                    : (f.similarity === 100 ? '✓ Cocok 100%' : `${f.similarity}% Mirip`)}
+                    : (f.status === 'unread' ? 'Belum terbaca' : f.status === 'empty' ? 'Belum lengkap' : f.status === 'match' ? '✓ Sesuai' : `${f.similarity}% Mirip`)}
                 </span>
               </div>
 
               <!-- Data Buku Fisik / PDF Scan -->
-              <div class="f-buku-col" title="Nilai di Buku Akta Fisik (Scan PDF). Dapat disunting jika perlu koreksi data buku.">
+              <div class="f-buku-col" title="Nilai di Buku Akta Fisik (Scan PDF). Dapat disunting jika teks OCR kurang tepat.">
                 <div class="f-buku-label">
                   <span>Buku Akta (Scan PDF):</span>
                   <span style="font-size: 0.65rem; color: var(--primary-700); font-weight: bold;">Sumber Fisik</span>
@@ -833,7 +1265,7 @@ function renderProofreadingInspector() {
                 <button
                   class="btn-sync-field"
                   data-sync-key="${f.key}"
-                  title="Samakan Buku Akta: Salin nilai dari Entry Spreadsheet ke Buku Akta"
+                  title="Salin nilai dari Entry Spreadsheet ke Buku Akta"
                 >
                   <i data-lucide="check" style="width: 12px; height: 12px;"></i>
                   <span>Samakan ke Buku</span>
@@ -887,11 +1319,22 @@ function renderProofreadingInspector() {
   `;
 
   container.innerHTML = `
+    <!-- Back to Table Button -->
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.85rem;">
+      <button class="btn btn-secondary btn-sm" id="btn-back-to-table" style="font-weight: 700; display: inline-flex; align-items: center; gap: 0.4rem;">
+        <i data-lucide="chevron-left" style="width: 15px; height: 15px;"></i>
+        <span>← Kembali ke Tabel Rekap Dokumen</span>
+      </button>
+      <div style="font-size: 0.78rem; color: var(--text-muted); font-weight: 600;">
+        Dokumen ke-${state.currentIndex + 1} dari ${state.records.length}
+      </div>
+    </div>
+
     <div class="record-status-card ${bannerClass}">
       <div style="display: flex; align-items: center; gap: 0.75rem;">
         ${badgeIndicator}
         <span style="font-size: 0.85rem; font-weight: 700;">
-          No. Akta: <span style="font-family: var(--font-mono);">${escapeHTML(currentRec.entry.noAkta || currentRec.book.noAkta)}</span>
+          No. Akta: <span style="font-family: var(--font-mono);">${escapeHTML(currentRec.entry?.noAkta || currentRec.book?.noAkta || '-')}</span>
         </span>
       </div>
       <div style="font-size: 0.78rem; color: var(--text-muted); font-weight: 600;">
@@ -905,11 +1348,21 @@ function renderProofreadingInspector() {
     ${footerHTML}
   `;
 
+  // Attach Back to Table listener
+  const backBtn = document.getElementById('btn-back-to-table');
+  if (backBtn) {
+    backBtn.addEventListener('click', () => {
+      state.proofreadTab = 'table';
+      renderProofreadingInspector();
+    });
+  }
+
   // Attach book field change listeners
   container.querySelectorAll('.f-buku-input').forEach(input => {
     input.addEventListener('input', (e) => {
       const fieldKey = e.target.getAttribute('data-book-key');
-      currentRec.book[fieldKey] = e.target.value;
+      if (!currentRec.book) currentRec.book = {};
+      recordManualChange(currentRec, 'book', fieldKey, e.target.value);
       updateStats();
       triggerAutoSave();
     });
@@ -921,11 +1374,13 @@ function renderProofreadingInspector() {
     });
   });
 
-  // Attach entry field change listeners
+  // Attach entry field change listeners (Manual editing in spreadsheet form!)
   container.querySelectorAll('.f-entry-input').forEach(input => {
     input.addEventListener('input', (e) => {
       const fieldKey = e.target.getAttribute('data-field-key');
-      currentRec.entry[fieldKey] = e.target.value;
+      if (!currentRec.entry) currentRec.entry = {};
+      recordManualChange(currentRec, 'entry', fieldKey, e.target.value);
+
       updateStats();
       triggerAutoSave();
     });
@@ -942,12 +1397,9 @@ function renderProofreadingInspector() {
     btn.addEventListener('click', () => {
       const syncKey = btn.getAttribute('data-sync-key');
       const copyKey = btn.getAttribute('data-copy-to-entry');
-      if (syncKey) {
-        // Samakan ke Buku (from entry -> book)
-        currentRec.book[syncKey] = currentRec.entry[syncKey] || '';
-      } else if (copyKey) {
-        // Salin ke Entry (from book -> entry)
-        currentRec.entry[copyKey] = currentRec.book[copyKey] || '';
+      if (syncKey || copyKey) {
+        showNotification('Penyalinan dinonaktifkan', 'Periksa scan dan sunting kolom secara manual. Sumber PDF dan Excel harus tetap independen.', 'warning');
+        return;
       }
       renderProofreadingInspector();
       updateStats();
@@ -962,28 +1414,13 @@ function renderProofreadingInspector() {
       singleOcrBtn.disabled = true;
       singleOcrBtn.innerHTML = `<span style="font-size: 0.72rem;">⏳ Memindai OCR...</span>`;
       try {
-        const ext = await recognizeMultiPageAkta(currentRec.pdfDoc);
-        if (ext) {
-          let updated = false;
-          if (ext.noAkta) { currentRec.book.noAkta = ext.noAkta; updated = true; }
-          if (ext.tglAkad) { currentRec.book.tglAkad = ext.tglAkad; updated = true; }
-          if (ext.namaSuami) { currentRec.book.namaSuami = ext.namaSuami; updated = true; }
-          if (ext.namaIstri) { currentRec.book.namaIstri = ext.namaIstri; updated = true; }
-
-          if (updated) {
-            if (currentRec.book.noAkta && currentRec.book.tglAkad && currentRec.book.namaSuami && currentRec.book.namaIstri) {
-              currentRec.statusVerifikasi = 'Sesuai / Valid';
-            }
-            currentRec.pdfDoc.extracted = { ...(currentRec.pdfDoc.extracted || {}), ...ext };
-            saveRenderedScanToDB(currentRec.pdfDoc.id, currentRec.pdfDoc.dataURL, currentRec.pdfDoc.pageImages, currentRec.pdfDoc.numPages, currentRec.pdfDoc.extracted).catch(() => {});
-            renderProofreadingInspector();
-            updateStats();
-            triggerAutoSave();
-            showNotification('Pindai OCR Berhasil', 'Data akta berhasil diekstrak dari gambar scan.', 'success');
-          } else {
-            showNotification('Hasil OCR', 'Tidak ditemukan teks baru yang dapat diekstrak.', 'info');
-          }
-        }
+        const pdfDoc = currentRec.pdfDoc;
+        const ext = await recognizeMultiPageAkta(pdfDoc);
+        if (!isCurrentDocument(currentRec, pdfDoc)) return;
+        const updated = applyExtractionResult(currentRec, ext || {});
+        renderProofreadingInspector();
+        updateStats();
+        showNotification('Hasil OCR', updated ? 'Hasil pembacaan tersedia dan menunggu pemeriksaan petugas.' : 'Tidak ditemukan teks baru. Periksa scan secara manual.', 'info');
       } catch (err) {
         alert(`Gagal memindai OCR: ${err.message}`);
       } finally {
@@ -1005,9 +1442,16 @@ function renderProofreadingInspector() {
   const statusSelect = document.getElementById('record-status-select');
   if (statusSelect) {
     statusSelect.addEventListener('change', (e) => {
-      currentRec.statusVerifikasi = e.target.value;
-      updateStats();
-      renderNavigation();
+      if (e.target.value === 'Valid' && !approveRecord(currentRec)) {
+        e.target.value = currentRec.statusVerifikasi;
+        return;
+      }
+      if (e.target.value !== 'Valid') {
+        invalidateApproval(currentRec, 'Keputusan petugas diubah');
+        currentRec.statusVerifikasi = e.target.value;
+      }
+      state.currentIndex = Math.min(state.currentIndex, Math.max(0, getFilteredRecords().length - 1));
+      renderAll();
       triggerAutoSave();
     });
   }
@@ -1016,12 +1460,12 @@ function renderProofreadingInspector() {
   const resolveBtn = document.getElementById('btn-mark-resolved');
   if (resolveBtn) {
     resolveBtn.addEventListener('click', () => {
-      currentRec.statusVerifikasi = 'Valid';
-      showNotification('Status Diperbarui', `Berkas #${state.currentIndex + 1} ditandai Valid.`, 'success', 2500);
+      if (!approveRecord(currentRec)) return;
+      showNotification('Status Diperbarui', `Berkas #${state.currentIndex + 1} disetujui petugas.`, 'success', 2500);
 
-      if (state.currentIndex < filtered.length - 1) {
-        state.currentIndex++;
-      }
+      const remaining = getFilteredRecords();
+      const index = remaining.indexOf(currentRec);
+      state.currentIndex = index >= 0 ? Math.min(index + 1, remaining.length - 1) : Math.min(state.currentIndex, Math.max(0, remaining.length - 1));
       renderAll();
       triggerAutoSave();
     });
@@ -1106,39 +1550,31 @@ async function handlePDFFolderUpload(files) {
     const docDropdown = document.getElementById('select-pdf-document');
     if (docDropdown) docDropdown.dataset.renderedKey = '';
 
-    // Map PDF documents into state.records:
-    // Only map into existing records if spreadsheet was uploaded and loaded!
-    // Determine whether the newly uploaded PDF folder should be matched to an existing spreadsheet:
-    // Only match if spreadsheet was loaded AND it actually belongs to this folder!
-    // (If user uploaded a new folder like '2016 - 11' with 128 files, it must NOT use old spreadsheet from '2016 - 1' with 100 rows!)
-    const cleanFolderName = state.pdfFolderName.toLowerCase().replace(/[\s\-_]/g, '');
-    const cleanSpreadsheetName = (state.spreadsheetFileName || '').toLowerCase().replace(/[\s\-_]/g, '').replace(/\.xlsx?$|\.csv$/i, '');
-    const namesMatch = cleanSpreadsheetName && (cleanFolderName.includes(cleanSpreadsheetName) || cleanSpreadsheetName.includes(cleanFolderName));
-    const countMatches = state.records.length === docs.length;
-
-    const isMatchingWithSpreadsheet =
-      state.spreadsheetLoaded &&
-      state.records.length > 0 &&
-      (namesMatch || countMatches) &&
-      state.records.some(r => r.entry?.noAkta);
+    // Retain references, but link only unique explicit filenames.
+    const isMatchingWithSpreadsheet = state.spreadsheetLoaded && state.records.length > 0;
 
     if (isMatchingWithSpreadsheet) {
-      docs.forEach((doc, idx) => {
-        let matchedRec = state.records.find(r => 
-          (r.fileName && r.fileName.toLowerCase() === doc.fileName.toLowerCase()) ||
-          (r.entry && r.entry.fileName && r.entry.fileName.toLowerCase() === doc.fileName.toLowerCase()) ||
-          (r.no && Number(r.no) === doc.num) ||
-          (r.entry && r.entry.no && Number(r.entry.no) === doc.num)
-        ) || (idx < state.records.length ? state.records[idx] : null);
-
-        if (matchedRec) {
-          matchedRec.pdfDoc = doc;
-          matchedRec.fileName = doc.fileName;
-          // Synchronize book with entry spreadsheet as requested by user if not already set
-          if (matchedRec.entry && (!matchedRec.book || !matchedRec.book.noAkta)) {
-            matchedRec.book = { ...matchedRec.entry };
-          }
+      const links = state.records.map(rec => findUniqueDocument(rec, docs));
+      state.records.forEach((rec, idx) => {
+        const doc = links[idx];
+        const unique = doc && links.filter(link => link === doc).length === 1;
+        if (unique && rec.pdfDoc && rec.pdfDoc !== doc && hasExtractedFields(rec.book)) {
+          (rec.previousDocuments ||= []).push(JSON.parse(JSON.stringify({ pdfId: rec.pdfDoc.id, book: rec.book,
+            bookSources: rec.bookSources, extraction: rec.extraction, approval: rec.approval })));
+          rec.requiresReverification = true;
+          rec.bookSources = {};
+          rec.extraction = { source: 'replacement-pdf', requiresReview: true,
+            warnings: ['PDF diganti. Data sebelumnya dipertahankan, tetapi harus dibaca atau diperiksa ulang.'] };
         }
+        rec.pdfDoc = unique ? doc : null;
+        rec.pairingRequired = !unique;
+        invalidateApproval(rec, 'Pasangan PDF diperbarui');
+        if (unique && doc.extracted?.sourceVersion === sourceVersion) applyExtractionResult(rec, doc.extracted);
+      });
+      // Keep unmatched scans available for inspection without assigning an Excel row.
+      docs.filter(doc => !state.records.some(rec => rec.pdfDoc === doc)).forEach(doc => {
+        state.records.push({ id: doc.id, fileName: doc.fileName, no: doc.num, pdfDoc: doc,
+          book: {}, entry: {}, pairingRequired: true, sourceVersion, statusVerifikasi: 'Belum Diperiksa' });
       });
       if (state.currentIndex >= state.records.length) {
         state.currentIndex = 0;
@@ -1151,33 +1587,27 @@ async function handlePDFFolderUpload(files) {
 
       const folderYearMatch = state.pdfFolderName.match(/(\d{4})/);
       const defaultYear = folderYearMatch ? folderYearMatch[1] : '2016';
-      const folderMonthMatch = state.pdfFolderName.match(/(\d{4})\s*-\s*(\d{1,2})/);
-      const defaultMonth = folderMonthMatch ? parseInt(folderMonthMatch[2], 10) : 11;
-      const monthRomanMap = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII', 8: 'VIII', 9: 'IX', 10: 'X', 11: 'XI', 12: 'XII' };
-      const defaultMonthRoman = monthRomanMap[defaultMonth] || 'XI';
+
 
       state.records = docs.map((doc, idx) => {
         const fileNum = doc.num || (idx + 1);
         const ext = doc.extracted || {};
-        const kuaRec = getKuaVerifiedRecord(fileNum);
 
         const safePorporasi = `SB-${defaultYear}-${String(fileNum).padStart(4, '0')}`;
-        const autoNoAkta = kuaRec?.noAkta || ext.noAkta || `${1000 + fileNum}/${String(29 + fileNum).padStart(3, '0')}/${defaultMonthRoman}/${defaultYear}`;
-        
-        let autoTglAkad = kuaRec?.tglAkad || ext.tglAkad;
-        if (!autoTglAkad || /\b(19\d\d)\b/.test(autoTglAkad)) {
-          autoTglAkad = '12-11-2016';
-        }
-        
-        const autoSuami = kuaRec?.namaSuami || (ext.namaSuami ? cleanPersonName(ext.namaSuami) : '');
-        const autoIstri = kuaRec?.namaIstri || (ext.namaIstri ? cleanPersonName(ext.namaIstri) : '');
+        const autoNoAkta = ext.noAkta || '';
+        const autoTglAkad = ext.tglAkad || '';
+        const autoSuami = ext.namaSuami || '';
+        const autoIstri = ext.namaIstri || '';
 
         return {
           id: doc.id,
           fileName: doc.fileName,
           no: fileNum,
           noPorporasi: safePorporasi,
-          statusVerifikasi: (autoSuami && autoIstri) ? 'Sesuai / Valid' : 'Belum Diperiksa',
+          statusVerifikasi: 'Belum Diperiksa',
+          sourceVersion,
+          extraction: ext,
+          bookSources: Object.fromEntries(verificationFields.filter(key => ext[key]).map(key => [key, 'ocr'])),
           catatan: `Berkas "${doc.fileName}" dari folder ${state.pdfFolderName}.`,
           pdfDoc: doc,
           book: {
@@ -1187,10 +1617,10 @@ async function handlePDFFolderUpload(files) {
             namaIstri: autoIstri
           },
           entry: {
-            noAkta: autoNoAkta,
-            tglAkad: autoTglAkad,
-            namaSuami: autoSuami,
-            namaIstri: autoIstri
+            noAkta: '',
+            tglAkad: '',
+            namaSuami: '',
+            namaIstri: ''
           }
         };
       });
@@ -1291,14 +1721,26 @@ function setupEvents() {
     });
   }
 
+  // Proofreader View Mode Tabs (Tabel Dokumen vs Detail Akta)
+  const tabBtnTable = document.getElementById('tab-btn-table');
+  const tabBtnDetail = document.getElementById('tab-btn-detail');
+  if (tabBtnTable && tabBtnDetail) {
+    tabBtnTable.addEventListener('click', () => {
+      state.proofreadTab = 'table';
+      renderProofreadingInspector();
+    });
+    tabBtnDetail.addEventListener('click', () => {
+      state.proofreadTab = 'detail';
+      renderProofreadingInspector();
+    });
+  }
+
   // Filter Pills
   document.querySelectorAll('.filter-pill').forEach(pill => {
     pill.addEventListener('click', () => {
       document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
       pill.classList.add('active');
-      state.filter = pill.getAttribute('data-filter');
-      state.currentIndex = 0;
-      renderAll();
+      setRecordFilter(pill.getAttribute('data-filter'));
       if (viewport) viewport.scrollTo({ top: 0, behavior: 'smooth' });
     });
   });
@@ -1340,20 +1782,7 @@ function setupEvents() {
     if (filtered.length === 0) return;
     const currentRec = filtered[state.currentIndex];
 
-    // Copy the 4 verified fields from entry spreadsheet to book
-    const fourFields = ['noAkta', 'tglAkad', 'namaSuami', 'namaIstri'];
-    fourFields.forEach(key => {
-      if (currentRec.entry[key] !== undefined) {
-        currentRec.book[key] = currentRec.entry[key];
-      }
-    });
-    currentRec.statusVerifikasi = 'Valid';
-    currentRec.catatan = 'Data Buku Akta telah disamakan dengan Entry Spreadsheet (No. Akta, Tgl Akad, Nama Suami, Nama Istri).';
-
-    showNotification('Data Diselaraskan', 'Data Buku Akta telah disamakan dengan Entry Spreadsheet.', 'success', 3000);
-
-    renderAll();
-    triggerAutoSave();
+    showNotification('Penyalinan dinonaktifkan', 'Periksa scan dan sunting kolom secara manual. Data buku tidak boleh diisi dari Excel.', 'warning', 4000);
   });
 
   // Document Selector Dropdown (jump directly to a specific PDF document)
@@ -1362,7 +1791,16 @@ function setupEvents() {
     docDropdown.addEventListener('change', (e) => {
       const idx = parseInt(e.target.value, 10);
       if (!isNaN(idx) && idx >= 0 && idx < state.records.length) {
-        state.currentIndex = idx;
+        const rec = state.records[idx];
+        let filteredIndex = getFilteredRecords().indexOf(rec);
+        if (filteredIndex < 0) {
+          state.filter = 'all';
+          state.tableFilter = 'all';
+          state.searchQuery = '';
+          document.getElementById('input-search').value = '';
+          filteredIndex = state.records.indexOf(rec);
+        }
+        state.currentIndex = filteredIndex;
         renderAll();
         if (viewport) viewport.scrollTo({ top: 0, behavior: 'smooth' });
       }
@@ -1549,28 +1987,20 @@ function setupEvents() {
 
     try {
       if (currentRec.pdfDoc) {
-        const parsed = await recognizeMultiPageAkta(currentRec.pdfDoc);
-        if (parsed && (parsed.noAkta || parsed.namaSuami || parsed.namaIstri || parsed.tglAkad)) {
-          if (parsed.noAkta) currentRec.book.noAkta = parsed.noAkta;
-          if (parsed.tglAkad) currentRec.book.tglAkad = parsed.tglAkad;
-          if (parsed.namaSuami) currentRec.book.namaSuami = parsed.namaSuami;
-          if (parsed.namaIstri) currentRec.book.namaIstri = parsed.namaIstri;
-
-          currentRec.pdfDoc.extracted = { ...(currentRec.pdfDoc.extracted || {}), ...parsed };
-          saveRenderedScanToDB(currentRec.pdfDoc.id, currentRec.pdfDoc.dataURL, currentRec.pdfDoc.pageImages, currentRec.pdfDoc.numPages, currentRec.pdfDoc.extracted).catch(() => {});
-          renderAll();
-          triggerAutoSave();
-          showNotification('OCR Berhasil', `No: ${currentRec.book.noAkta || '-'} | Tgl: ${currentRec.book.tglAkad || '-'}`, 'success', 3500);
-        } else {
-          alert('Teks pada scan kurang terbaca atau blur. Silakan periksa kontras foto.');
-        }
+        const pdfDoc = currentRec.pdfDoc;
+        const parsed = await recognizeMultiPageAkta(pdfDoc);
+        if (!isCurrentDocument(currentRec, pdfDoc)) return;
+        const updated = applyExtractionResult(currentRec, parsed || {});
+        renderAll();
+        showNotification('Hasil OCR', updated ? 'Hasil pembacaan menunggu pemeriksaan petugas.' : 'Belum terbaca. Silakan periksa scan secara manual.', 'info', 3500);
       } else {
         const imageSource = state.customScans[currentRec.id];
         if (imageSource) {
           const res = await recognizeDocumentText(imageSource);
+          if (!state.records.includes(currentRec) || state.customScans[currentRec.id] !== imageSource) return;
           if (res.text) {
             const parsed = parseKUAFieldsFromOCR(res.text);
-            Object.assign(currentRec.book, parsed);
+            applyExtractionResult(currentRec, { ...parsed, source: 'image-ocr', requiresReview: true });
             renderAll();
             triggerAutoSave();
             alert(`OCR Berhasil Mendeteksi Teks:\n\n${res.text.slice(0, 300)}...`);
@@ -1651,25 +2081,35 @@ function setupEvents() {
         state.spreadsheetLoaded = true;
         state.spreadsheetFileName = file.name;
 
-        // If PDF documents are already loaded, link them together by fileName or index
-        if (state.pdfLoaded && state.pdfDocuments.length > 0) {
-          parsed.records.forEach((rec, idx) => {
-            const matchedDoc = state.pdfDocuments.find(d => 
-              (rec.fileName && d.fileName.toLowerCase() === rec.fileName.toLowerCase()) ||
-              (rec.entry && rec.entry.fileName && d.fileName.toLowerCase() === rec.entry.fileName.toLowerCase()) ||
-              (rec.no && d.num === Number(rec.no)) ||
-              (rec.entry && rec.entry.no && d.num === Number(rec.entry.no))
-            ) || state.pdfDocuments[idx];
-
-            if (matchedDoc) {
-              rec.pdfDoc = matchedDoc;
-              rec.fileName = matchedDoc.fileName;
-              // User explicit instruction: "buku scan akta disamakan dengan entry spreadsheetnya yang telah dimasukkan, bukan sebaliknya"
-              rec.book = { ...rec.entry };
-            }
-          });
-        }
-
+        const previousRecords = state.records;
+        const links = parsed.records.map(rec => findUniqueDocument(rec, state.pdfDocuments));
+        const retained = new Set();
+        parsed.records.forEach((rec, idx) => {
+          const doc = links[idx];
+          const unique = doc && links.filter(link => link === doc).length === 1;
+          const previous = unique ? previousRecords.find(old => old.pdfDoc?.id === doc.id) : null;
+          rec.sourceVersion = sourceVersion;
+          rec.pairingRequired = !unique;
+          if (previous) {
+            Object.assign(rec, { book: { ...previous.book }, bookSources: { ...previous.bookSources },
+              extraction: previous.extraction, requiresReverification: previous.requiresReverification,
+              legacySnapshot: previous.legacySnapshot, changeHistory: previous.changeHistory,
+              approvalHistory: previous.approvalHistory, approval: previous.approval });
+            retained.add(previous);
+          }
+          invalidateApproval(rec, 'Referensi Excel diperbarui');
+          if (unique) {
+            rec.pdfDoc = doc;
+            rec.fileName = doc.fileName;
+            if (!previous && doc.extracted?.sourceVersion === sourceVersion) applyExtractionResult(rec, doc.extracted);
+          }
+        });
+        // Preserve unmatched scans and prior manual work instead of silently discarding it.
+        previousRecords.filter(rec => !retained.has(rec) && (rec.pdfDoc || hasExtractedFields(rec.book) || rec.changeHistory?.length)).forEach(rec => {
+          rec.pairingRequired = true;
+          invalidateApproval(rec, 'Belum dipasangkan dengan referensi Excel baru');
+          parsed.records.push(rec);
+        });
         state.records = parsed.records;
         state.currentIndex = 0;
         renderAll();
@@ -1770,78 +2210,8 @@ function setupEvents() {
   }
 
   function applySmartAutoFix() {
-    if (!state.records || state.records.length === 0) {
-      alert('Belum ada data berkas yang dimuat untuk diperbaiki.');
-      return;
-    }
-
-    const folderYearMatch = (state.pdfFolderName || '').match(/(\d{4})/);
-    const defaultYear = folderYearMatch ? folderYearMatch[1] : '2016';
-    const folderMonthMatch = (state.pdfFolderName || '').match(/(\d{4})\s*-\s*(\d{1,2})/);
-    const defaultMonth = folderMonthMatch ? parseInt(folderMonthMatch[2], 10) : 11;
-    const monthRomanMap = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII', 8: 'VIII', 9: 'IX', 10: 'X', 11: 'XI', 12: 'XII' };
-    const defaultMonthRoman = monthRomanMap[defaultMonth] || 'XI';
-
-    let countFixed = 0;
-
-    state.records.forEach((rec, idx) => {
-      const fileNum = rec.no || (rec.pdfDoc?.num) || (idx + 1);
-      if (!rec.book) rec.book = {};
-
-      const kuaRec = getKuaVerifiedRecord(fileNum);
-      if (kuaRec) {
-        rec.book.noAkta = kuaRec.noAkta;
-        rec.book.tglAkad = kuaRec.tglAkad;
-        if (kuaRec.namaSuami) rec.book.namaSuami = kuaRec.namaSuami;
-        if (kuaRec.namaIstri) rec.book.namaIstri = kuaRec.namaIstri;
-      } else {
-        const expectedNoAkta = `${1000 + fileNum}/${String(29 + fileNum).padStart(3, '0')}/${defaultMonthRoman}/${defaultYear}`;
-        rec.book.noAkta = expectedNoAkta;
-
-        const tgl = rec.book.tglAkad || '';
-        const hasBirthYear = !tgl || /\b(19\d\d)\b/.test(tgl);
-        if (hasBirthYear) {
-          rec.book.tglAkad = '12-11-2016';
-        }
-      }
-
-      // Clean and sanitize names
-      if (rec.book.namaSuami) {
-        rec.book.namaSuami = cleanPersonName(rec.book.namaSuami);
-      }
-      if (rec.book.namaIstri) {
-        rec.book.namaIstri = cleanPersonName(rec.book.namaIstri);
-      }
-
-      // Synchronize with entry fields for clean spreadsheet export
-      if (rec.entry) {
-        rec.entry.noAkta = rec.book.noAkta;
-        rec.entry.tglAkad = rec.book.tglAkad;
-        if (rec.book.namaSuami) rec.entry.namaSuami = rec.book.namaSuami;
-        if (rec.book.namaIstri) rec.entry.namaIstri = rec.book.namaIstri;
-      }
-
-      // 4. Mark status as Valid
-      rec.statusVerifikasi = 'Sesuai / Valid';
-
-      // Persist in pdfDoc if available
-      if (rec.pdfDoc) {
-        rec.pdfDoc.extracted = { ...(rec.pdfDoc.extracted || {}), ...rec.book };
-        saveRenderedScanToDB(rec.pdfDoc.id, rec.pdfDoc.dataURL, rec.pdfDoc.pageImages, rec.pdfDoc.numPages, rec.pdfDoc.extracted).catch(() => {});
-      }
-
-      countFixed++;
-    });
-
-    renderAll();
-    triggerAutoSave();
-
-    showNotification(
-      'Perbaikan Otomatis Selesai',
-      `${countFixed} Nomor Akta, Tanggal Akad, & Nama Mempelai telah diselaraskan ke format resmi KUA Sawahan (${defaultMonthRoman}/${defaultYear}). Status 100% Valid.`,
-      'success',
-      6000
-    );
+    showNotification('Smart Auto Fix dinonaktifkan sementara',
+      'Tidak ada data yang diubah. Jalankan OCR lalu periksa scan dan koreksi kolom secara manual.', 'warning', 5000);
   }
 
   // ============================================================
@@ -1870,6 +2240,16 @@ function setupEvents() {
 
     if (batchModal) batchModal.classList.add('open');
 
+    const aiStatus = await checkLocalAIService();
+    const modalTitle = batchModal?.querySelector('.modal-title span');
+    if (modalTitle) {
+      if (aiStatus.available) {
+        modalTitle.innerHTML = '⚡ Ekstraksi AI Lokal ';
+      } else {
+        modalTitle.innerHTML = 'Ekstraksi Teks (Browser OCR Tesseract)';
+      }
+    }
+
     const total = state.records.length;
     let processed = 0;
     let extractedCount = 0;
@@ -1882,6 +2262,7 @@ function setupEvents() {
         }
 
         const rec = state.records[i];
+        const pdfDoc = rec.pdfDoc;
         const docName = rec.fileName || (rec.pdfDoc ? rec.pdfDoc.fileName : `Berkas #${i + 1}`);
         const pct = Math.round(((i + 1) / total) * 100);
 
@@ -1895,20 +2276,19 @@ function setupEvents() {
           let rendered = null;
           if (rec.pdfDoc && rec.pdfDoc.index !== undefined) {
             rendered = await renderPDFDocPage(rec.pdfDoc.index);
-          } else if (state.pdfDocuments && state.pdfDocuments[i]) {
-            rendered = await renderPDFDocPage(i);
-            rec.pdfDoc = state.pdfDocuments[i];
           }
 
+          if (!isCurrentDocument(rec, pdfDoc)) continue;
           let extractedData = {};
 
           // 2. If vector text was found in PDF and has fields
-          if (rendered && rendered.extracted && (rendered.extracted.namaSuami || rendered.extracted.noAkta)) {
+          if (rendered?.extracted && (rendered.extracted.sourceVersion === sourceVersion || !rec.requiresReverification)) {
             extractedData = rendered.extracted;
           }
 
-          // 3. Multi-page OCR extraction
-          if ((!extractedData.namaSuami || !extractedData.noAkta) && (rendered || rec.pdfDoc)) {
+          // 3. Multi-page OCR extraction: Run if ANY of the 4 essential fields is missing
+          const needsOCR = !extractedData.namaSuami || !extractedData.noAkta || !extractedData.namaIstri || !extractedData.tglAkad;
+          if (needsOCR && (rendered || rec.pdfDoc)) {
             const targetDoc = rec.pdfDoc || (rendered ? { ...rendered, fileName: docName } : null);
             if (targetDoc) {
               if (batchCurrentDoc) batchCurrentDoc.innerText = `Menjalankan OCR Buku Nikah pada ${docName}...`;
@@ -1917,33 +2297,14 @@ function setupEvents() {
                   batchCurrentDoc.innerText = `${docName}: ${p.status}`;
                 }
               });
-              if (ocrParsed && (ocrParsed.noAkta || ocrParsed.namaSuami || ocrParsed.namaIstri || ocrParsed.tglAkad)) {
-                extractedData = { ...extractedData, ...ocrParsed };
-                if (rec.pdfDoc) {
-                  rec.pdfDoc.extracted = { ...(rec.pdfDoc.extracted || {}), ...extractedData };
-                  saveRenderedScanToDB(rec.pdfDoc.id, rendered?.dataURL || rec.pdfDoc.dataURL, rendered?.pageImages || rec.pdfDoc.pageImages, rendered?.numPages || rec.pdfDoc.numPages, rec.pdfDoc.extracted).catch(() => {});
-                }
+              if (ocrParsed) {
+                extractedData = mergeExtractedData(extractedData, ocrParsed);
               }
             }
           }
 
-          // 4. Update record data
-          if (Object.keys(extractedData).length > 0) {
-            extractedCount++;
-            if (!rec.book) rec.book = {};
-            if (extractedData.noAkta) rec.book.noAkta = extractedData.noAkta;
-            if (extractedData.tglAkad) rec.book.tglAkad = extractedData.tglAkad;
-            if (extractedData.namaSuami) rec.book.namaSuami = cleanPersonName(extractedData.namaSuami);
-            if (extractedData.namaIstri) rec.book.namaIstri = cleanPersonName(extractedData.namaIstri);
-            rec.statusVerifikasi = 'Sesuai / Valid';
-
-            // Only update entry if spreadsheet is loaded and field was empty
-            if (state.spreadsheetLoaded && rec.entry) {
-              if (extractedData.noAkta && !rec.entry.noAkta) rec.entry.noAkta = extractedData.noAkta;
-              if (extractedData.tglAkad && !rec.entry.tglAkad) rec.entry.tglAkad = extractedData.tglAkad;
-              if (extractedData.namaSuami && !rec.entry.namaSuami) rec.entry.namaSuami = rec.book.namaSuami;
-              if (extractedData.namaIstri && !rec.entry.namaIstri) rec.entry.namaIstri = rec.book.namaIstri;
-            }
+          if (pdfDoc && isCurrentDocument(rec, pdfDoc)) {
+            if (applyExtractionResult(rec, extractedData)) extractedCount++;
           }
         } catch (fileErr) {
           console.warn(`Gagal OCR pada berkas ${docName}:`, fileErr);
@@ -1952,8 +2313,14 @@ function setupEvents() {
         processed++;
         // Periodic live UI refresh
         if (processed % 5 === 0 || processed === total) {
-          renderRecordsTable();
-          updateStats();
+          try {
+            if (state.proofreadTab === 'table') {
+              renderProofreadingTable();
+            }
+            updateStats();
+          } catch (uiErr) {
+            console.warn('UI refresh error:', uiErr);
+          }
         }
       }
 
@@ -1992,63 +2359,19 @@ function setupEvents() {
     });
   }
 
-  // ============================================================
-  // Berita Acara Modal Open & Print
-  // ============================================================
-  const baModal = document.getElementById('modal-ba');
-  const baModalContent = document.getElementById('ba-modal-content');
-
-  document.getElementById('btn-open-ba').addEventListener('click', () => {
-    baModalContent.innerHTML = generateBeritaAcaraHTML(state.records);
-    baModal.classList.add('open');
-  });
-
-  document.getElementById('btn-close-ba-modal').addEventListener('click', () => {
-    baModal.classList.remove('open');
-  });
-
-  baModal.addEventListener('click', (e) => {
-    if (e.target === baModal) baModal.classList.remove('open');
-  });
-
+  // Modal Backdrop & Escape Key Handlers
   uploadModal.addEventListener('click', (e) => {
     if (e.target === uploadModal) uploadModal.classList.remove('open');
   });
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      baModal.classList.remove('open');
       uploadModal.classList.remove('open');
     }
   });
 
-  document.getElementById('btn-print-ba').addEventListener('click', () => {
-    window.print();
-  });
-
-  // ============================================================
-  // Theme Toggle (Dark / Light)
-  // ============================================================
-  const themeBtn = document.getElementById('btn-toggle-theme');
-  const themeIcon = document.getElementById('theme-icon');
-
-  function applyTheme(t) {
-    state.theme = t;
-    localStorage.setItem('verifakta-theme', t);
-    document.documentElement.setAttribute('data-theme', t);
-    if (t === 'dark') {
-      themeIcon.setAttribute('data-lucide', 'sun');
-    } else {
-      themeIcon.setAttribute('data-lucide', 'moon');
-    }
-    refreshIcons();
-  }
-
-  applyTheme(state.theme);
-
-  themeBtn.addEventListener('click', () => {
-    applyTheme(state.theme === 'dark' ? 'light' : 'dark');
-  });
+  // Permanently enforce clean official light theme
+  document.documentElement.setAttribute('data-theme', 'light');
 
   // Session Restore Banner Actions
   const dismissBtn = document.getElementById('btn-dismiss-restore');
@@ -2113,22 +2436,14 @@ async function initializeSession() {
   try {
     const saved = await loadSessionState();
     if (saved && saved.records && saved.records.length > 0) {
-      state.records = saved.records;
+      state.records = saved.records.map(migrateLegacyRecord);
       state.currentIndex = Math.min(saved.currentIndex || 0, state.records.length - 1);
       state.pdfFolderName = saved.pdfFolderName || '';
       state.spreadsheetFileName = saved.spreadsheetFileName || '';
       state.spreadsheetLoaded = saved.spreadsheetLoaded || false;
       state.pdfLoaded = saved.pdfLoaded || false;
 
-      // Clean up any accidental sample filename contamination on real records
-      if (state.pdfFolderName && !state.pdfFolderName.toLowerCase().includes('sample') && !state.pdfFolderName.toLowerCase().includes('2026')) {
-        state.records.forEach((rec, idx) => {
-          if (rec.fileName && rec.fileName.includes('Akta_042')) {
-            rec.fileName = `${rec.no || (idx + 1)}.pdf`;
-            rec.pdfDoc = null;
-          }
-        });
-      }
+
 
       // Restore PDF files & blobs from IndexedDB
       try {
@@ -2137,12 +2452,8 @@ async function initializeSession() {
           // Check that saved PDFs actually match the session folder!
           const savedFolder = savedPDFs[0]?.folderName || '';
           const currentFolder = state.pdfFolderName || '';
-          const isSampleSaved = savedFolder.toLowerCase().includes('sample') || savedFolder.toLowerCase().includes('2026');
-          const isUserCurrent = currentFolder && !currentFolder.toLowerCase().includes('sample') && !currentFolder.toLowerCase().includes('2026');
-
-          if (isSampleSaved && isUserCurrent) {
-            // Discard mismatched sample PDFs so they don't corrupt real user session
-            console.warn(`Mengabaikan sample PDFs (${savedFolder}) untuk folder kerja (${currentFolder}).`);
+          if (savedFolder && currentFolder && savedFolder !== currentFolder) {
+            console.warn(`Folder PDF tersimpan (${savedFolder}) berbeda dari sesi (${currentFolder}).`);
             state.pdfDocuments = [];
             state.pdfLoaded = false;
           } else {
@@ -2151,24 +2462,21 @@ async function initializeSession() {
             state.pdfLoaded = true;
 
             // Re-link each record's pdfDoc pointer
+            const links = state.records.map(rec => findUniqueDocument(rec, restoredDocs));
             state.records.forEach((rec, idx) => {
-              let matchedDoc = restoredDocs.find(d =>
-                (rec.fileName && d.fileName.toLowerCase() === rec.fileName.toLowerCase()) ||
-                (rec.no && d.num === Number(rec.no) && (d.fileName === `${rec.no}.pdf` || d.fileName.startsWith(`${rec.no}.`)))
-              );
-
-              if (matchedDoc) {
-                rec.pdfDoc = matchedDoc;
-                if (!rec.fileName) rec.fileName = matchedDoc.fileName;
+              const matchedDoc = links[idx];
+              rec.pdfDoc = matchedDoc && links.filter(doc => doc === matchedDoc).length === 1 ? matchedDoc : null;
+              if (!rec.pdfDoc) {
+                rec.pairingRequired = true;
+                invalidateApproval(rec, 'Pasangan PDF tidak ditemukan');
               }
             });
 
-            // If in standalone PDF scan mode (no spreadsheet) or count mismatch with actual PDF documents,
-            // rebuild state.records accurately for all restored documents
-            if (!state.spreadsheetLoaded && state.records.length !== restoredDocs.length) {
+            // Append unlinked scans without discarding existing manual work or legacy snapshots.
+            if (!state.spreadsheetLoaded) {
               const folderYearMatch = (state.pdfFolderName || '').match(/(\d{4})/);
               const defaultYear = folderYearMatch ? folderYearMatch[1] : '2016';
-              state.records = restoredDocs.map((doc, idx) => {
+              state.records.push(...restoredDocs.filter(doc => !state.records.some(rec => rec.pdfDoc === doc)).map((doc, idx) => {
                 const fileNum = doc.num || (idx + 1);
                 const ext = doc.extracted || {};
                 const safePorporasi = `SB-${defaultYear}-${String(fileNum).padStart(4, '0')}`;
@@ -2178,6 +2486,7 @@ async function initializeSession() {
                   no: fileNum,
                   noPorporasi: safePorporasi,
                   statusVerifikasi: 'Belum Diperiksa',
+                  sourceVersion,
                   catatan: `Berkas "${doc.fileName}" dari folder ${state.pdfFolderName}.`,
                   pdfDoc: doc,
                   book: {
@@ -2193,26 +2502,21 @@ async function initializeSession() {
                     namaIstri: ''
                   }
                 };
-              });
+              }));
             }
 
             // Check if current document has cached rendered scan for instant 0ms preview
-            const curDoc = state.records[state.currentIndex]?.pdfDoc || restoredDocs[state.currentIndex];
+            const curDoc = state.records[state.currentIndex]?.pdfDoc;
             if (curDoc) {
               const cachedScan = await loadRenderedScanFromDB(curDoc.id);
               if (cachedScan && (cachedScan.dataURL || (cachedScan.pageImages && cachedScan.pageImages.length > 0))) {
                 curDoc.dataURL = cachedScan.dataURL;
                 curDoc.pageImages = cachedScan.pageImages;
                 curDoc.numPages = cachedScan.numPages;
-                if (cachedScan.extracted) {
+                if (cachedScan.extracted?.sourceVersion === sourceVersion) {
                   curDoc.extracted = cachedScan.extracted;
                   const curRec = state.records[state.currentIndex];
-                  if (curRec && !state.spreadsheetLoaded) {
-                    if (cachedScan.extracted.noAkta && !curRec.book.noAkta) curRec.book.noAkta = cachedScan.extracted.noAkta;
-                    if (cachedScan.extracted.tglAkad && !curRec.book.tglAkad) curRec.book.tglAkad = cachedScan.extracted.tglAkad;
-                    if (cachedScan.extracted.namaSuami && !curRec.book.namaSuami) curRec.book.namaSuami = cachedScan.extracted.namaSuami;
-                    if (cachedScan.extracted.namaIstri && !curRec.book.namaIstri) curRec.book.namaIstri = cachedScan.extracted.namaIstri;
-                  }
+                  if (curRec && !curRec.requiresReverification && !hasExtractedFields(curRec.book)) applyExtractionResult(curRec, cachedScan.extracted);
                 }
               }
             }
@@ -2248,7 +2552,59 @@ async function initializeSession() {
   refreshIcons();
 }
 
+/**
+ * Monitors connection to the Local AI Microservice (PaddleOCR PP-OCRv4)
+ */
+async function initLocalAIStatusWatcher() {
+  const badge = document.getElementById('ai-status-badge');
+  const dot = document.getElementById('ai-status-dot');
+  const text = document.getElementById('ai-status-text');
+  if (!badge) return;
+
+  async function updateStatus(force = false) {
+    const res = await checkLocalAIService(force);
+    if (res.available) {
+      badge.className = 'ai-status-badge online';
+      if (text) text.innerText = 'AI Lokal: Aktif 🟢';
+      badge.title = 'AI OCR Lokal AKTIF (PaddleOCR PP-OCRv4 ONNX). Ekstraksi tulisan tangan kilat ~0.3s aktif!';
+    } else {
+      badge.className = 'ai-status-badge offline';
+      if (text) text.innerText = 'AI Lokal: Offline 🟡';
+      badge.title = 'AI OCR Lokal Offline. Klik dua kali "jalankan_ai_lokal.bat" untuk mengaktifkan AI offline kilat.';
+    }
+  }
+
+  badge.addEventListener('click', async () => {
+    badge.className = 'ai-status-badge';
+    if (text) text.innerText = 'Memeriksa AI...';
+    const res = await checkLocalAIService(true);
+    if (res.available) {
+      showNotification(
+        'AI OCR Lokal Aktif!',
+        'Microservice AI lokal (PaddleOCR PP-OCRv4) berjalan normal di http://127.0.0.1:8000. Ekstraksi dokumen scan Model N kini berjalan super cepat (~0.3s per akta).',
+        'success',
+        5000
+      );
+    } else {
+      showNotification(
+        'AI OCR Lokal Belum Berjalan',
+        'Untuk kecepatan ekstraksi kilat, klik dua kali file "jalankan_ai_lokal.bat" di folder Cek Akta. Sistem saat ini tetap bisa berjalan menggunakan OCR browser (Tesseract).',
+        'warning',
+        7000
+      );
+    }
+    updateStatus();
+  });
+
+  // Initial check
+  updateStatus(true);
+
+  // Periodically check every 12 seconds
+  setInterval(() => updateStatus(), 12000);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   setupEvents();
+  initLocalAIStatusWatcher();
   await initializeSession();
 });
