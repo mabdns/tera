@@ -87,6 +87,15 @@ class HeaderDateRegionTests(unittest.TestCase):
         self.assertIsNone(result)
         engine.assert_not_called()
 
+    def test_header_crop_stops_at_birth_section_even_when_name_label_is_missing(self):
+        rows = [[box("Pada hari ini akad nikah", 40, 40, 440)],
+                [box("2. Tempat dan tanggal lahir", 40, 80, 440)],
+                [box("12 November 1984", 40, 110, 440)]]
+        result, engine = self.detect([], rows=rows)
+        self.assertIsNone(result)
+        expected = cv2.resize(self.image[28:66, 28:492], None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        np.testing.assert_array_equal(engine.call_args.args[0], expected)
+
     def test_each_supported_header_anchor_allows_a_date(self):
         for anchor in ("Pada hari ini", "Akad nikah", "Masehi"):
             with self.subTest(anchor=anchor):
@@ -169,6 +178,29 @@ class HeaderDateRegionTests(unittest.TestCase):
         items.append(token("12", 100, 100))
         result, _ = self.detect(items)
         self.assertEqual(result[0], "12-11-2016")
+
+    def test_curved_gregorian_day_requires_its_printed_date_slot_labels(self):
+        items = [token("12", 100, 108), token("November", 220, 90), token("2016", 360, 90),
+                 token("tanggal", 50, 108, width=40), token("bulan", 160, 108, width=40)]
+        result, _ = self.detect(items)
+        self.assertEqual(result[0], "12-11-2016")
+        self.assertIn("curved_date_slot_check_labels", result[1]["warnings"])
+        self.assertEqual(len(result[1]["boxes"]), 5)
+        for missing in (3, 4):
+            self.assertIsNone(self.detect([b for i, b in enumerate(items) if i != missing])[0])
+
+    def test_curved_date_cannot_take_day_outside_slot_or_labels_on_another_line(self):
+        for day_x, label_y in ((40, 108), (180, 108), (100, 145)):
+            with self.subTest(day_x=day_x, label_y=label_y):
+                items = [token("22", day_x, 108), token("November", 220, 90), token("2016", 360, 90),
+                         token("tanggal", 50, label_y, width=40), token("bulan", 160, label_y, width=40)]
+                self.assertIsNone(self.detect(items)[0])
+
+    def test_curved_slot_cannot_borrow_explicit_hijri_day_when_gregorian_day_is_missing(self):
+        items = [token("22", 100, 108), token("November", 220, 90), token("2016", 360, 90),
+                 token("tanggal", 50, 108, width=40), token("bulan", 160, 108, width=40),
+                 token("Safar", 220, 108), token("1438", 360, 108)]
+        self.assertIsNone(self.detect(items)[0])
 
     def test_multiple_distinct_valid_dates_are_ambiguous(self):
         for extra in (token("13", 140, 90), token("2017", 420, 90)):
@@ -304,6 +336,18 @@ class SpouseNameRegionTests(unittest.TestCase):
         self.assertEqual(self.response["data"]["namaSuami"], "BUDI BARU")
         self.assertEqual(detail["previousReading"]["text"], "")
         self.assertNotIn("ocr_engine_disagreement", detail["warnings"])
+
+    def test_shared_primary_and_region_reading_beats_correlated_wrong_majority(self):
+        self.response["data"]["namaSuami"] = "BUDI.SANTOSO"
+        self.refine([self.reading(0, "BUDT SANTOSO"), self.reading(1, "BUDT SANTOSO"),
+                     self.reading(2, "BUDI SANTOSO", 80)])
+        self.assertEqual(self.response["data"]["namaSuami"], "BUDI SANTOSO")
+        detail = self.response["fieldDetails"]["namaSuami"]
+        self.assertEqual(detail["alternativeText"], "BUDT SANTOSO")
+        self.assertEqual(detail["previousReading"]["text"], "BUDI.SANTOSO")
+        self.assertEqual(len(detail["regionReadings"]), 3)
+        self.assertEqual(detail["status"], "review")
+        self.assertIn("cross_engine_candidate_agreement_check_alternatives", detail["warnings"])
 
     def test_confirmed_same_name_keeps_baseline_raw_and_does_not_flag_disagreement(self):
         self.refine([self.reading(0, "BUDI LAMA"), self.reading(1, "BUDI LAMA")])

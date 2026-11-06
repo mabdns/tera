@@ -7,7 +7,7 @@ import numpy as np
 
 
 NAME_LABEL = re.compile(
-    r"\b(?:nama|narna|nauna)\s+(?:lengkap|leugkap|keugkap)(?:\s+dan\s+alias)?\s*[:.=-]?",
+    r"(?<![A-Za-z0-9])(?:[1Il][.)]?\s*)?(?:nama|narna|nauna)\s*(?:lengkap|leugkap|keugkap)\b(?:\s+dan\s+alias)?\s*[:.=-]?",
     re.I,
 )
 ROLE = re.compile(r"\b(?:calon\s+)?(suami|istri|isteri)\b", re.I)
@@ -15,6 +15,7 @@ NEXT_ITEM = re.compile(
     r"\b(?:tempat|lahir|kewarganegaraan|pekerjaan|alamat|nomor\s+induk|NIK)\b|^\s*2\s*[.)]",
     re.I,
 )
+PARENT_SECTION = re.compile(r"\b(?:orang\s*tua|ayah|ibu|kandung|wali)\b|^\s*[89]\s*[.)]", re.I)
 HEADER_WORDS = re.compile(
     r"\b(?:pada\s+hari|bulan|tahun|hijriyah|masehi|akad|tanggal|dilangsungkan)\b", re.I
 )
@@ -107,6 +108,7 @@ class PageReader:
         self.height, self.width = self.image.shape[:2]
         self.timings = {"detectMs": 0.0, "recognizeMs": 0.0}
         self.recognized_count = 0
+        self.detailed_columns = {}
         start = perf_counter()
         scale = min(1.0, 1280 / max(self.height, self.width))
         detection_image = cv2.resize(self.image, None, fx=scale, fy=scale)
@@ -172,12 +174,42 @@ class PageReader:
             for row in group:
                 text = " ".join(b["text"] for b in row)
                 output.append(row)
+                if PARENT_SECTION.search(text):
+                    return output
                 anchor_seen = anchor_seen or bool(NAME_LABEL.search(text))
                 role_seen = role_seen or bool(ROLE.search(text))
                 # Do not fall through to a parent's name if item 1 is unreadable.
                 if (anchor_seen or role_seen) and NEXT_ITEM.search(text):
                     return output
         return output
+
+    def read_detailed_column(self, right=False):
+        """Retry only the top of a Model N spouse column at full detail.
+
+        This is a search region, not a source of assumed values: names still
+        require their label and dates their marriage-specific evidence.
+        """
+        if right in self.detailed_columns:
+            return self.detailed_columns[right]
+        if not callable(self.engine):
+            return []
+        x0 = self.width // 2 if right else 0
+        x1 = self.width if right else self.width // 2
+        crop = self.image[:max(1, self.height // 3), x0:x1]
+        start = perf_counter()
+        predictions, _ = self.engine(crop)
+        self.timings["detailMs"] = self.timings.get("detailMs", 0.0) + (perf_counter() - start) * 1000
+        boxes = []
+        for quad, text, confidence in predictions or []:
+            quad = np.asarray(quad, dtype=np.float32) + np.array([x0, 0], dtype=np.float32)
+            lo, hi = quad.min(axis=0), quad.max(axis=0)
+            boxes.append({"quad": quad, "text": str(text).strip(), "confidence": float(confidence),
+                          "x0": float(lo[0]), "x1": float(hi[0]), "y0": float(lo[1]), "y1": float(hi[1]),
+                          "cx": float((lo[0] + hi[0]) / 2), "cy": float((lo[1] + hi[1]) / 2),
+                          "h": float(hi[1] - lo[1])})
+        rows = rows_from_boxes(boxes)
+        self.detailed_columns[right] = rows
+        return rows
 
     def observed_text(self):
         return [b["text"] for b in sorted(self.boxes, key=lambda b: (b["cy"], b["cx"]))
@@ -192,6 +224,10 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
     rows = [row for row in rows if row]
     for index, row in enumerate(rows):
         text = " ".join(b.get("text", "") for b in row)
+        if PARENT_SECTION.search(text):
+            return "", {"status": "review", "warnings": ["name_anchor_missing_before_parent_section"]}
+        if re.match(r"^\s*2\s*[.)]", text):
+            return "", {"status": "review", "warnings": ["name_anchor_missing_before_item_2"]}
         role_match = ROLE.search(text)
         if role_match:
             role = "istri" if role_match[1].lower() in ("istri", "isteri") else "suami"
@@ -205,40 +241,59 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
         # Identify the label's box even when the label spans multiple boxes.
         prefix = ""
         anchor_end = 0
+        # Regex whitespace may include the join between detector boxes; that
+        # separator must not move the anchor from the label to the value box.
+        anchor_limit = label.start() + len(label.group().rstrip())
         for pos, box in enumerate(row):
             prefix += (" " if prefix else "") + box.get("text", "")
-            if len(prefix) >= label.end():
+            if len(prefix) >= anchor_limit:
                 anchor_end = pos
                 break
         anchor = row[anchor_end]
-        selected = [anchor]
-        pieces = [text[label.end():len(prefix)].lstrip(" :.-=")]
+        inline_value = text[label.end():len(prefix)].lstrip(" :.-=")
+        # A standalone label is not part of the name's image evidence. Keeping
+        # it in the crop makes supplementary OCR read the form label as a name.
+        selected = [anchor] if inline_value else []
+        pieces = [inline_value]
         previous = anchor
+        distant_value = False
         for box in row[anchor_end + 1:]:
+            if re.fullmatch(r"[\s.·:_=\-]+", box.get("text", "")):
+                continue
             # Distant side notes must not be glued onto a person's name.
             if box["x0"] - previous["x1"] > max(3 * anchor["h"], 0.16 * (row[-1]["x1"] - row[0]["x0"])):
-                break
+                # The first value can occupy a distant form column. Subsequent
+                # distant text remains excluded. Keep the spatial uncertainty
+                # visible rather than forcing a match or borrowing another row.
+                if (previous is anchor and not any(piece.strip() for piece in pieces)
+                        and valid_name(box.get("text", ""))
+                        and abs(box["cy"] - anchor["cy"]) <= 0.75 * min(box["h"], anchor["h"])):
+                    distant_value = True
+                else:
+                    break
             selected.append(box)
             pieces.append(box.get("text", ""))
             previous = box
         raw = " ".join(p for p in pieces if p).strip(" :.-=")
         aligned_previous = False
-        if not raw and index > 0:
+        if (not raw or HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or not valid_name(raw)) and index > 0:
             # A sloped form can put the value slightly above its left-hand
             # label, creating two OCR rows. Accept only the immediately prior
             # row, to the right of the label, within the same vertical band.
             # A previous full line (or item-2 value below) is not a name source.
             candidates = [b for b in rows[index - 1]
                           if b["x0"] >= anchor["x1"]
-                          and abs(b["cy"] - anchor["cy"]) <= 0.75 * min(b["h"], anchor["h"])]
+                          and abs(b["cy"] - anchor["cy"]) <= 1.25 * min(b["h"], anchor["h"])]
             if candidates:
-                selected = [candidates[0]]
+                prior_selected = [candidates[0]]
                 for candidate in candidates[1:]:
-                    if candidate["x0"] - selected[-1]["x1"] > 3 * anchor["h"]:
+                    if candidate["x0"] - prior_selected[-1]["x1"] > 3 * anchor["h"]:
                         break
-                    selected.append(candidate)
-                raw = " ".join(b.get("text", "") for b in selected).strip(" :.-=")
-                aligned_previous = bool(raw)
+                    prior_selected.append(candidate)
+                prior_raw = " ".join(b.get("text", "") for b in prior_selected).strip(" :.-=")
+                if valid_name(prior_raw) and not HEADER_WORDS.search(prior_raw) and not NEXT_ITEM.search(prior_raw):
+                    raw, selected = prior_raw, prior_selected
+                    aligned_previous = True
         if not raw and index + 1 < len(rows):
             following = rows[index + 1]
             first = following[0]
@@ -256,6 +311,8 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
                     previous = box
                 raw = " ".join(b.get("text", "") for b in selected)
         warnings = []
+        if distant_value:
+            warnings.append("distant_name_value_check_alignment")
         if aligned_previous:
             warnings.append("name_value_above_label_check_alignment")
         if role is None:
@@ -283,7 +340,7 @@ def header_before_person(rows):
     header = []
     for row in rows:
         text = " ".join(b.get("text", "") for b in row)
-        if NAME_LABEL.search(text) or ROLE.search(text):
+        if NAME_LABEL.search(text) or ROLE.search(text) or NEXT_ITEM.search(text) or PARENT_SECTION.search(text):
             break
         header.append(text)
     # No semantic context means this is not a trustworthy wedding date region.
@@ -343,6 +400,31 @@ def extract_layout_document(images, engine, extract_number, extract_date,
                 if not right:
                     left_rows = rows
                 value, detail = name_from_rows(rows, role, clean_name, valid_name)
+                header = header_before_person(rows)
+                date_value = extract_date(header) if header else ""
+                # Whole-page detection can lose small header/name glyphs. A
+                # bounded column retry retains detail without reading Excel or
+                # falling through to a parent's name when item 1 is absent.
+                if not value or (not right and not data["tglAkad"] and not date_value):
+                    try:
+                        detailed_rows = reader.read_detailed_column(right)
+                        if detailed_rows:
+                            retry_value, retry_detail = name_from_rows(detailed_rows, role, clean_name, valid_name)
+                            if not value and retry_value:
+                                retry_detail["previousReading"] = {"text": value, "details": detail}
+                                retry_detail["source"] = "local-detailed-column"
+                                retry_detail["status"] = "review"
+                                retry_detail.setdefault("warnings", []).append("verify_detailed_column_against_scan")
+                                value, detail = retry_value, retry_detail
+                            # Date extraction must see the same high-detail
+                            # header. Name candidates retain their source boxes.
+                            rows = detailed_rows
+                            header = header_before_person(rows)
+                            date_value = extract_date(header) if header else ""
+                    except Exception as error:
+                        warnings.append(f"Pembacaan ulang kolom {role} gagal: {error}")
+                if not right:
+                    left_rows = rows
                 # Selective recognition-only contrast retry; never overwrite a
                 # disagreement merely because the alternative confidence rose.
                 if not value or "low_ocr_confidence" in detail.get("warnings", []):
@@ -367,8 +449,6 @@ def extract_layout_document(images, engine, extract_number, extract_date,
                         detail["warnings"].append("name_correction_suggested")
                         detail["status"] = "review"
                 data[field], details[field] = value, detail
-                header = header_before_person(rows)
-                date_value = extract_date(header) if header else ""
                 if date_value:
                     if data["tglAkad"] and data["tglAkad"] != date_value:
                         details["tglAkad"]["warnings"].append("conflicting_date_candidates")

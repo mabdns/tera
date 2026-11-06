@@ -110,6 +110,37 @@ class ServiceNameCleaningTests(unittest.TestCase):
 
 
 class NameLayoutTests(unittest.TestCase):
+    def test_joined_name_label_remains_an_explicit_anchor(self):
+        for label in ("1.Namalengkap", "Nama lengkap", "Narnaleugkap", "1Namalengkap", "lNama lengkap", "INama lengkap"):
+            with self.subTest(label=label):
+                value, detail = self.extract([[box("SUAMI")],
+                                              [box(label + ": BUDI SANTOSO", y=70)]])
+                self.assertEqual(value, "BUDI SANTOSO")
+                self.assertEqual(detail["status"], "extracted")
+
+    def test_joined_label_cannot_match_a_longer_word_or_bypass_item_two(self):
+        self.assertIsNone(layout.NAME_LABEL.search("Namalengkapnya"))
+        self.assertIsNone(layout.NAME_LABEL.search("AbdulNamalengkap"))
+        self.assertIsNone(layout.NAME_LABEL.search("x1Namalengkap"))
+        value, detail = self.extract([[box("SUAMI")],
+                                      [box("2. Tempat lahir", y=70)],
+                                      [box("Namalengkap: NAMA AYAH", y=200)]])
+        self.assertEqual(value, "")
+        self.assertIn("name_anchor_missing_before_item_2", detail["warnings"])
+
+    def test_item_two_name_label_is_not_item_one(self):
+        value, detail = self.extract([[box("SUAMI")], [box("2.Nama lengkap: BUDI", y=70)]])
+        self.assertEqual(value, "")
+        self.assertIn("name_anchor_missing_before_item_2", detail["warnings"])
+
+    def test_parent_section_blocks_joined_parent_label_when_item_two_was_not_detected(self):
+        for parent in ("Orangtua/Ayah kandung", "Orang tua / Ibu kandung", "8. Orang tua"):
+            with self.subTest(parent=parent):
+                value, detail = self.extract([[box("7.")], [box(parent, y=70)],
+                                              [box("a.Namalengkap: NAMA ORANG TUA", y=100)]])
+                self.assertEqual(value, "")
+                self.assertIn("name_anchor_missing_before_parent_section", detail["warnings"])
+
     def extract(self, rows, role="suami", validator=valid_name):
         return layout.name_from_rows(rows, role, identity, validator)
 
@@ -176,7 +207,7 @@ class NameLayoutTests(unittest.TestCase):
         self.assertEqual(value, "BUDI SANTOSO")
         self.assertEqual(detail["rawText"], value)
         self.assertEqual(detail["boxes"], [b["quad"].tolist()
-                                          for b in (label_end, first, second)])
+                                          for b in (first, second)])
         self.assertNotIn(noise["quad"].tolist(), detail["boxes"])
         self.assertEqual(detail["coordinateSpace"], "normalized_page_pixels")
 
@@ -220,6 +251,25 @@ class NameLayoutTests(unittest.TestCase):
         self.assertEqual(value, "")
         self.assertEqual(detail["status"], "review")
 
+    def test_curved_form_does_not_take_birthplace_from_label_row(self):
+        name = box("BUDI SANTOSO", x=460, y=100, width=180, height=20)
+        label = box("1.Nama lengkap", x=180, y=118, width=110, height=20)
+        birth = box("KOTA 15 JUNI 1984", x=460, y=118)
+        value, detail = self.extract([[box("SUAMI", y=80)], [name], [label, birth],
+                                      [box("2. Tempat lahir", y=150)]], validator=lambda text: not any(c.isdigit() for c in text))
+        self.assertEqual(value, "BUDI SANTOSO")
+        self.assertEqual(detail["boxes"], [name["quad"].tolist()])
+        self.assertEqual(detail["status"], "review")
+
+    def test_distant_first_name_value_can_use_same_row_but_not_glue_side_note(self):
+        label = box("Nama lengkap", x=180, y=100, width=110)
+        name = box("BUDI SANTOSO", x=500, y=100, width=150)
+        note = box("CATATAN", x=950, y=100, width=100)
+        value, detail = self.extract([[box("SUAMI")], [label, name, note]])
+        self.assertEqual(value, "BUDI SANTOSO")
+        self.assertNotIn(note["quad"].tolist(), detail["boxes"])
+        self.assertIn("distant_name_value_check_alignment", detail["warnings"])
+
     def test_absolute_y_shift_does_not_change_name_or_status(self):
         for offset in (0, 250, 1100):
             with self.subTest(offset=offset):
@@ -262,6 +312,21 @@ class NameLayoutTests(unittest.TestCase):
 
 
 class ReaderTests(unittest.TestCase):
+    def test_detailed_column_retry_is_bounded_cached_and_maps_boxes_back_to_page(self):
+        class Engine(FakeEngine):
+            def __call__(self, image):
+                self.region_shape = image.shape
+                self.region_calls = getattr(self, "region_calls", 0) + 1
+                return [(box("Nama lengkap: SITI", x=10, y=30)["quad"], "Nama lengkap: SITI", 0.9)], 0.01
+        engine = Engine([[]])
+        reader = layout.PageReader(engine, self.image)
+        rows = reader.read_detailed_column(True)
+        self.assertEqual(engine.region_shape, (800 // 3, 500, 3))
+        self.assertEqual(rows[0][0]["x0"], 510)
+        self.assertEqual(rows[0][0]["y0"], 30)
+        self.assertIs(reader.read_detailed_column(True), rows)
+        self.assertEqual(engine.region_calls, 1)
+
     def test_rapidocr_runtime_component_names_detect_and_recognize(self):
         # The installed RapidOCR API uses these names, unlike the historical
         # FakeEngine. Exercise crop coordinates and actual recognition routing.
@@ -444,6 +509,13 @@ class ReaderTests(unittest.TestCase):
 
 
 class HeaderAndDateTests(unittest.TestCase):
+    def test_missing_name_label_does_not_extend_header_into_birth_or_parent_section(self):
+        header = "Pada hari ini akad nikah"
+        for boundary in ("2. Tempat dan tanggal lahir", "Orangtua/Ayah kandung", "8. Orang tua"):
+            with self.subTest(boundary=boundary):
+                rows = [[box(header)], [box(boundary, y=70)], [box("12 November 1984", y=100)]]
+                self.assertEqual(layout.header_before_person(rows), [header])
+
     @classmethod
     def setUpClass(cls):
         cls.service = load_service_without_models()

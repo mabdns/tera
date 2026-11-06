@@ -10,12 +10,13 @@ import subprocess
 import cv2
 import numpy as np
 
-from ocr_layout import NAME_LABEL, ROLE
+from ocr_layout import NAME_LABEL, ROLE, NEXT_ITEM, PARENT_SECTION
 
 ROOT = Path(__file__).resolve().parent
 GREGORIAN_MONTH = re.compile(
     r"\b(?:januari|februari|pebruari|maret|april|mei|juni|juli|agustus|"
     r"september|oktober|november|nopember|desember)\b", re.I)
+HIJRI_MONTH = re.compile(r"\b(?:muharr?am|safar|shafar|rabi\w*|rabt\w*|jumad\w*|rajab|sya\w*|ramad\w*|dzul\w*|zul\w*)\b", re.I)
 
 
 def line_crop(image, quads):
@@ -55,12 +56,48 @@ def clean_form_dots(crop):
     return cv2.copyMakeBorder(255 - clean, 16, 16, 16, 16, cv2.BORDER_CONSTANT, value=255)
 
 
+def curved_day_slot(day, month, boxes):
+    """Require the printed tanggal/bulan labels around a curved date slot."""
+    # Explicit Hijriyah month/year evidence rules out borrowing that row's day
+    # even when curved printing makes it close to the Gregorian baseline.
+    for hijri_month in boxes:
+        if not HIJRI_MONTH.search(hijri_month["text"]):
+            continue
+        for year in boxes:
+            if not re.fullmatch(r"[\s.,:=-]*1[2-5]\d{2}[\s.,:=-]*", year["text"]):
+                continue
+            if not day["cx"] < hijri_month["cx"] < year["cx"]:
+                continue
+            slope = (year["cy"] - hijri_month["cy"]) / (year["cx"] - hijri_month["cx"])
+            projected = hijri_month["cy"] + slope * (day["cx"] - hijri_month["cx"])
+            if abs(slope) <= 0.1 and abs(day["cy"] - projected) <= 0.65 * min(day["h"], hijri_month["h"], year["h"]):
+                return []
+    labels = lambda word: [b for b in boxes if re.fullmatch(r"[\s.,:=-]*" + word + r"[\s.,:=-]*", b["text"], re.I)]
+    for right in labels("bulan"):
+        # This must be the label immediately before the Gregorian month word,
+        # rather than a lower Hijriyah line's bulan label.
+        if not day["cx"] < right["cx"] < month["cx"]:
+            continue
+        if abs(right["cy"] - month["cy"]) > 1.5 * min(right["h"], month["h"]):
+            continue
+        for left in labels("tanggal"):
+            if not left["cx"] < day["cx"]:
+                continue
+            if (np.max(left["quad"][:, 0]) >= np.min(day["quad"][:, 0])
+                    or np.max(day["quad"][:, 0]) >= np.min(right["quad"][:, 0])):
+                continue
+            projected = left["cy"] + (right["cy"] - left["cy"]) * (day["cx"] - left["cx"]) / (right["cx"] - left["cx"])
+            if abs(day["cy"] - projected) <= min(day["h"], left["h"], right["h"]):
+                return [left, right]
+    return []
+
+
 def header_date_candidate(image, rows, engine, extract_date):
     """Redetect the bounded header at full detail, then require a same-line date."""
     header_boxes = []
     for row in rows:
         text = " ".join(b.get("text", "") for b in row)
-        if ROLE.search(text) or NAME_LABEL.search(text):
+        if ROLE.search(text) or NAME_LABEL.search(text) or NEXT_ITEM.search(text) or PARENT_SECTION.search(text):
             break
         header_boxes.extend(row)
     context = " ".join(b.get("text", "") for b in header_boxes)
@@ -101,17 +138,25 @@ def header_date_candidate(image, rows, engine, extract_date):
                 if not day_match or day["cx"] >= month["cx"]:
                     continue
                 projected = month["cy"] + slope * (day["cx"] - month["cx"])
+                slot_labels = []
                 if abs(day["cy"] - projected) > 0.65 * min(day["h"], month["h"], year["h"]):
-                    continue
+                    # On a curved book, nearby printed field labels can provide
+                    # local alignment that a straight month/year baseline lacks.
+                    # Do not loosen the baseline test without that evidence.
+                    if abs(day["cy"] - projected) > 1.25 * min(day["h"], month["h"], year["h"]):
+                        continue
+                    slot_labels = curved_day_slot(day, month, boxes)
+                    if not slot_labels:
+                        continue
                 raw = f"{day_match[1]} {match[0]} {year_match[1]}"
                 value = extract_date(["Akad nikah " + raw])
                 if value:
-                    candidates.append((value, raw, [day, month, year]))
+                    candidates.append((value, raw, [day, month, year] + slot_labels))
     if len({value for value, _, _ in candidates}) != 1:
         return None
     value, raw, selected = candidates[0]
     return value, {"rawText": raw, "headerContext": context, "status": "review", "page": 2,
-                   "source": "local-header-region", "warnings": ["verify_date_against_scan"],
+                   "source": "local-header-region", "warnings": ["verify_date_against_scan"] + (["curved_date_slot_check_labels"] if len(selected) > 3 else []),
                    "confidence": min(b["confidence"] for b in selected),
                    "boxes": [b["quad"].tolist() for b in selected],
                    "coordinateSpace": "normalized_page_pixels"}
@@ -181,11 +226,26 @@ def refine_spouse_names(image, response, clean_name, valid_name):
             detail.setdefault("warnings", []).append("region_readings_disagree")
             continue
         selected = [candidate for candidate in candidates if candidate["text"] == value]
-        raw = selected[0]["rawText"]
         previous = response["data"][field]
+        # Variants from one OCR engine are correlated, not independent votes.
+        # When its minority candidate agrees with the primary engine's letters,
+        # retain that cross-engine reading instead of replacing F with E merely
+        # because two raster sizes repeat the same error. Preserve every raw
+        # candidate and keep the result subject to review.
+        letter_key = lambda text: re.sub(r"[\s.,]", "", text.upper())
+        shared = [candidate for candidate in candidates
+                  if previous and letter_key(candidate["text"]) == letter_key(previous)]
+        cross_engine_agreement = bool(shared and letter_key(value) != letter_key(previous))
+        consensus_value = value
+        if cross_engine_agreement:
+            value = shared[0]["text"]
+            selected = [candidate for candidate in shared if candidate["text"] == value]
+        raw = selected[0]["rawText"]
         # A bounded, dot-cleaned line is the new reading, not a dictionary correction.
-        # Keep the earlier model output whenever the two engines disagree.
+        # Preserve the earlier model output as evidence when engines disagree.
         warnings = ["verify_name_against_scan", "form_dots_removed_check_punctuation"]
+        if cross_engine_agreement:
+            warnings.append("cross_engine_candidate_agreement_check_alternatives")
         if previous and previous != value:
             warnings.append("ocr_engine_disagreement")
         response["data"][field] = value
@@ -197,4 +257,6 @@ def refine_spouse_names(image, response, clean_name, valid_name):
             "warnings": list(dict.fromkeys(detail.get("warnings", []) + warnings)),
             "previousReading": {"text": previous, "details": detail},
         }
+        if cross_engine_agreement:
+            response["fieldDetails"][field]["alternativeText"] = consensus_value
     response["requiresReview"] = True
