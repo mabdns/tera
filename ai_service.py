@@ -212,8 +212,10 @@ def clean_person_name(name):
     cleaned = re.sub(r'^[^a-zA-Z]+', '', cleaned)
     # Strip role prefixes
     cleaned = re.sub(r'^(?:Calon\s+Suami|Calon\s+Istri|Suami|Istri|Mempelai)\s*[:\.]?\s*', '', cleaned, flags=re.I)
-    # Strip trailing dashes, dots, underscores from SIMKAH formatting
-    cleaned = re.sub(r'[\-\_\.\s]+$', '', cleaned)
+    # Form rules can be read as a mixture of ASCII and Unicode dashes. Remove
+    # the entire trailing run before filtering characters so it cannot leave
+    # an ASCII dash behind and split otherwise identical OCR votes.
+    cleaned = re.sub(r'[\-\u2010-\u2015\u2212_\.\s]+$', '', cleaned)
     # Strip bin / binti suffix
     cleaned = re.sub(r'\s+(?:bin|binti)\b.*$', '', cleaned, flags=re.I)
     cleaned = re.sub(r'[\r\n\t]+', ' ', cleaned)

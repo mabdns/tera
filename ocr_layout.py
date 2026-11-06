@@ -90,9 +90,19 @@ def rows_from_boxes(boxes):
 
 
 class PageReader:
-    """RapidOCR 1.2.x adapter: detect once, recognize selected line crops in batches."""
+    """Detect once and recognize selected crops using RapidOCR 1.x components."""
     def __init__(self, engine, image):
         self.engine = engine
+        # rapidocr-onnxruntime exposes text_det/text_rec. Older adapters used
+        # the longer names; accept those without requiring an engine mutation.
+        detector = getattr(engine, "text_det", None)
+        recognizer = getattr(engine, "text_rec", None)
+        if detector is None:
+            detector = getattr(engine, "text_detector", None)
+        if recognizer is None:
+            recognizer = getattr(engine, "text_recognizer", None)
+        if not callable(detector) or not callable(recognizer):
+            raise RuntimeError("Engine RapidOCR tidak menyediakan komponen deteksi/pengenalan yang didukung")
         self.image, self.geometry = prepare_page(image)
         self.height, self.width = self.image.shape[:2]
         self.timings = {"detectMs": 0.0, "recognizeMs": 0.0}
@@ -100,7 +110,7 @@ class PageReader:
         start = perf_counter()
         scale = min(1.0, 1280 / max(self.height, self.width))
         detection_image = cv2.resize(self.image, None, fx=scale, fy=scale)
-        quads, _ = engine.text_detector(detection_image)
+        quads, _ = detector(detection_image)
         self.timings["detectMs"] = (perf_counter() - start) * 1000
         self.boxes = []
         if quads is not None:
@@ -133,7 +143,10 @@ class PageReader:
             crops = [cv2.cvtColor(clahe.apply(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)),
                                   cv2.COLOR_GRAY2BGR) for c in crops]
         start = perf_counter()
-        predictions, _ = self.engine.text_recognizer(crops)
+        recognizer = getattr(self.engine, "text_rec", None)
+        if recognizer is None:
+            recognizer = self.engine.text_recognizer
+        predictions, _ = recognizer(crops)
         self.timings["recognizeMs"] += (perf_counter() - start) * 1000
         self.recognized_count += len(crops)
         if len(predictions) != len(selected):
@@ -209,6 +222,23 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
             pieces.append(box.get("text", ""))
             previous = box
         raw = " ".join(p for p in pieces if p).strip(" :.-=")
+        aligned_previous = False
+        if not raw and index > 0:
+            # A sloped form can put the value slightly above its left-hand
+            # label, creating two OCR rows. Accept only the immediately prior
+            # row, to the right of the label, within the same vertical band.
+            # A previous full line (or item-2 value below) is not a name source.
+            candidates = [b for b in rows[index - 1]
+                          if b["x0"] >= anchor["x1"]
+                          and abs(b["cy"] - anchor["cy"]) <= 0.75 * min(b["h"], anchor["h"])]
+            if candidates:
+                selected = [candidates[0]]
+                for candidate in candidates[1:]:
+                    if candidate["x0"] - selected[-1]["x1"] > 3 * anchor["h"]:
+                        break
+                    selected.append(candidate)
+                raw = " ".join(b.get("text", "") for b in selected).strip(" :.-=")
+                aligned_previous = bool(raw)
         if not raw and index + 1 < len(rows):
             following = rows[index + 1]
             first = following[0]
@@ -226,6 +256,8 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
                     previous = box
                 raw = " ".join(b.get("text", "") for b in selected)
         warnings = []
+        if aligned_previous:
+            warnings.append("name_value_above_label_check_alignment")
         if role is None:
             warnings.append("role_anchor_missing")
         if HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or not valid_name(raw):

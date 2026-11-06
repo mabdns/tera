@@ -100,6 +100,15 @@ def load_service_without_models():
     return module
 
 
+class ServiceNameCleaningTests(unittest.TestCase):
+    def test_mixed_form_rule_dashes_do_not_change_name_votes(self):
+        service = load_service_without_models()
+        for suffix in ("---", "-—", "---–", "−"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(service.clean_person_name("BUDI-SANTOSO, SS" + suffix),
+                                 "BUDI-SANTOSO, SS")
+
+
 class NameLayoutTests(unittest.TestCase):
     def extract(self, rows, role="suami", validator=valid_name):
         return layout.name_from_rows(rows, role, identity, validator)
@@ -190,6 +199,27 @@ class NameLayoutTests(unittest.TestCase):
         self.assertEqual(value, "BUDI SANTOSO")
         self.assertEqual(detail["boxes"], [b["quad"].tolist() for b in (first, last)])
 
+    def test_sloped_name_value_just_above_label_is_not_replaced_by_birthplace(self):
+        name = box("BUDI SANTOSO", x=460, y=125, width=180, height=30)
+        label = box("1. Nama lengkap", x=180, y=140, width=110, height=20)
+        birth = box("KOTA, 15 DESEMBER 1984", x=460, y=155, height=30)
+        value, detail = self.extract([
+            [box("I. SUAMI", y=115, height=20)], [name], [label], [birth],
+            [box("2. Tempat dan tanggal lahir", y=170)]])
+        self.assertEqual(value, "BUDI SANTOSO")
+        self.assertEqual(detail["boxes"], [name["quad"].tolist()])
+        self.assertEqual(detail["status"], "review")
+        self.assertIn("name_value_above_label_check_alignment", detail["warnings"])
+
+    def test_previous_full_line_cannot_be_used_as_name(self):
+        value, detail = self.extract([
+            [box("SUAMI", y=20)],
+            [box("CATATAN LAIN", x=460, y=40)],
+            [box("Nama lengkap", x=180, y=70, width=110)],
+            [box("2. Tempat lahir", y=100)]])
+        self.assertEqual(value, "")
+        self.assertEqual(detail["status"], "review")
+
     def test_absolute_y_shift_does_not_change_name_or_status(self):
         for offset in (0, 250, 1100):
             with self.subTest(offset=offset):
@@ -232,6 +262,21 @@ class NameLayoutTests(unittest.TestCase):
 
 
 class ReaderTests(unittest.TestCase):
+    def test_rapidocr_runtime_component_names_detect_and_recognize(self):
+        # The installed RapidOCR API uses these names, unlike the historical
+        # FakeEngine. Exercise crop coordinates and actual recognition routing.
+        fake = FakeEngine([[box("Nomor Akta: 17/002/I/2020")]])
+        engine = types.SimpleNamespace(text_det=fake.text_detector,
+                                       text_rec=fake.text_recognizer,
+                                       get_crop_img_list=fake.get_crop_img_list)
+        image = np.full((800, 1000, 3), 255, dtype=np.uint8)
+        with patch.object(layout, "prepare_page", return_value=(image, {})):
+            reader = layout.PageReader(engine, image)
+            reader.recognize(reader.boxes)
+        self.assertEqual(reader.boxes[0]["text"], "Nomor Akta: 17/002/I/2020")
+        self.assertEqual(len(fake.detector_shapes), 1)
+        self.assertEqual(len(fake.recognition_batches), 1)
+
     def setUp(self):
         # These tests isolate geometry/extraction from scanner preprocessing.
         self.preparation = patch.object(layout, "prepare_page", side_effect=lambda image: (

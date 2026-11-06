@@ -294,6 +294,28 @@ function isValidComparisonDate(value) {
 // 2. Tanggal Akad Nikah (tglAkad)
 // 3. Nama Pengantin Laki-laki (namaSuami)
 // 4. Nama Pengantin Perempuan (namaIstri)
+// Compare typography only in recognized academic suffixes. Never strip
+// punctuation from the person's name or discard a missing/different title.
+function sameAcademicTitleFormatting(left, right) {
+  for (const title of ['AMD', 'SS', 'SSI', 'SH', 'SPD', 'SE', 'SKOM', 'MSI', 'MH', 'MPD', 'MM']) {
+    const letters = [...title].join('\\s*\\.?\\s*');
+    const pattern = new RegExp(`^(.+?)(\\s*,\\s*|\\s+)(${letters}\\.?)$`, 'i');
+    const a = left.match(pattern);
+    const b = right.match(pattern);
+    if (a && b && a[1].toLowerCase() === b[1].toLowerCase()
+      && /[,.]/.test(a[2] + a[3] + b[2] + b[3])) return true;
+  }
+  return false;
+}
+
+function ambiguousRomanMonth(left, right) {
+  const pattern = /^(\d+\/\d+\/)(I|1)(\/(?:19|20)\d{2})$/i;
+  const a = left.match(pattern);
+  const b = right.match(pattern);
+  return a && b && a[1] === b[1] && a[3] === b[3]
+    && a[2].toUpperCase() !== b[2].toUpperCase();
+}
+
 export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = true) {
   const fields = [
     { key: 'noAkta', label: 'Nomor Akta Nikah', category: 'Identitas Akta' },
@@ -316,6 +338,7 @@ export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = t
     let status;
     let message;
     let severity;
+    let normalization = null;
 
     if (!isSpreadsheetLoaded) {
       status = 'pending';
@@ -341,20 +364,30 @@ export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = t
       severity = 'danger';
       diff = computeCharDiff(bookVal, entryVal);
       totalErrors++;
+    } else if (field.key === 'noAkta' && ambiguousRomanMonth(bookVal, entryVal)) {
+      status = 'review';
+      message = 'Periksa scan: huruf Romawi I dan angka 1 pada bagian bulan belum dapat dibedakan. Belum dihitung cocok.';
+      severity = 'warning';
+      diff = computeCharDiff(bookVal, entryVal);
+      totalWarnings++;
     } else {
       diff = computeCharDiff(bookVal, entryVal);
       const isName = field.key === 'namaSuami' || field.key === 'namaIstri';
+      if (isName && bookVal.toLowerCase() !== entryVal.toLowerCase()
+        && sameAcademicTitleFormatting(bookVal, entryVal)) normalization = 'academic-title-format';
       const isEqual = field.key === 'tglAkad'
         ? normalizeDateToStandard(bookVal) === normalizeDateToStandard(entryVal)
-        : bookVal.toLowerCase() === entryVal.toLowerCase();
+        : bookVal.toLowerCase() === entryVal.toLowerCase() || !!normalization;
       similarity = isEqual ? 100 : (isName ? calculateSimilarity(bookVal, entryVal) : 0);
 
       // Similarity is rounded for display; only actual equality establishes a match.
       if (isEqual) {
         status = 'match';
-        message = 'Data cocok 100%';
+        message = normalization
+          ? 'Nama dan gelar sama setelah normalisasi titik, koma, dan spasi pada gelar. Teks asli tetap ditampilkan.'
+          : 'Data cocok 100%';
         severity = 'success';
-        diff = [{ type: 'same', text: entryVal }];
+        if (!normalization) diff = [{ type: 'same', text: entryVal }];
         matchesCount++;
       } else if (isName && similarity >= 75) {
         status = 'typo';
@@ -379,7 +412,8 @@ export function evaluateRecord(bookData, entryData = {}, isSpreadsheetLoaded = t
       diff,
       status,
       message,
-      severity
+      severity,
+      normalization
     });
   }
 

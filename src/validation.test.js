@@ -96,6 +96,68 @@ test('all four real matches are clean, allowing case, whitespace and date format
   assert.ok(result.evaluations.every(field => field.status === 'match' && field.similarity === 100));
 });
 
+test('recognized title typography compares equally while retaining both original strings', () => {
+  for (const [bookName, excelName] of [
+    ['SITI AMINAH A MD', 'SITI AMINAH, A.Md.'],
+    ['AHMAD FAUZI S H', 'AHMAD FAUZI, S.H.'],
+    ['SITI AMINAH, S.Si.', 'SITI AMINAH SSI']
+  ]) {
+    const book = { ...complete, namaIstri: bookName };
+    const entry = { ...complete, namaIstri: excelName };
+    const before = JSON.stringify({ book, entry });
+    const result = evaluateRecord(book, entry);
+    const field = result.evaluations.find(f => f.key === 'namaIstri');
+    assert.equal(field.status, 'match');
+    assert.equal(field.normalization, 'academic-title-format');
+    assert.equal(field.bookValue, bookName);
+    assert.equal(field.entryValue, excelName);
+    assert.ok(field.diff.some(d => d.type !== 'same'), 'raw differences remain available');
+    assert.equal(result.matchesCount, 4);
+    assert.equal(JSON.stringify({ book, entry }), before);
+  }
+});
+
+test('title normalization cannot hide different names, missing titles or meaningful punctuation', () => {
+  for (const [bookName, excelName] of [
+    ['SITI AMINA A MD', 'SITI AMINAH, A.Md.'],
+    ['SITI AMINAH', 'SITI AMINAH, A.Md.'],
+    ['SITI AMINAH, S.H.', 'SITI AMINAH, S.S.'],
+    ['SITI-AMINAH A MD', 'SITI AMINAH, A.Md.'],
+    ["SITI MA'RIFAH A MD", 'SITI MARIFAH, A.Md.'],
+    ['SITI AMINAH A MD', 'SITI AMINAH AMD'],
+    ['SITI AMINAH, XYZ', 'SITI AMINAH X Y Z']
+  ]) {
+    const result = evaluateRecord({ ...complete, namaIstri: bookName }, { ...complete, namaIstri: excelName });
+    const field = result.evaluations.find(f => f.key === 'namaIstri');
+    assert.notEqual(field.status, 'match', `${bookName} / ${excelName}`);
+    assert.equal(field.normalization, null);
+    assertNotClean(result, 3);
+  }
+});
+
+test('I versus 1 in the month segment requires review and never becomes a match', () => {
+  for (const [bookNumber, excelNumber] of [['17/002/1/2020', '17/002/I/2020'], ['17/002/I/2020', '17/002/1/2020']]) {
+    const result = evaluateRecord({ ...complete, noAkta: bookNumber }, { ...complete, noAkta: excelNumber });
+    const field = result.evaluations.find(f => f.key === 'noAkta');
+    assert.equal(field.status, 'review');
+    assert.equal(field.bookValue, bookNumber);
+    assert.equal(field.entryValue, excelNumber);
+    assert.equal(field.severity, 'warning');
+    assert.equal(result.totalErrors, 0);
+    assert.equal(result.totalWarnings, 1);
+    assertNotClean(result, 3);
+  }
+});
+
+test('other act number differences remain mismatches rather than I/1 review', () => {
+  for (const other of ['18/002/1/2020', '17/003/1/2020', '17/002/1/2021', '17/002/2/2020', '17/002/II/2020']) {
+    const result = evaluateRecord(complete, { ...complete, noAkta: other });
+    assert.equal(result.evaluations[0].status, 'mismatch', other);
+    assert.equal(result.totalErrors, 1);
+    assertNotClean(result, 3);
+  }
+});
+
 test('only names receive typo warnings; differing act numbers and dates are mismatches', () => {
   const changes = {
     noAkta: '17/002/I/2021',

@@ -215,6 +215,47 @@ for (const gate of ['no spreadsheet', 'no PDF', 'pairing required']) {
   });
 }
 
+test('ambiguous I/1 stays visible in table and detail and cannot be approved', () => {
+  const h = setupMain();
+  const record = makeRecord(makeDoc(), {
+    book: { ...fields, noAkta: '17/002/1/2020', namaIstri: 'SITI AMINAH A MD' },
+    entry: { ...fields, namaIstri: 'SITI AMINAH, A.Md.' }
+  });
+  h.select(record);
+  const original = plain({ book: record.book, entry: record.entry });
+  h.api.renderProofreadingTable();
+  let html = h.element('proofread-content').innerHTML;
+  assert.match(html, /Perlu pemeriksaan/);
+  assert.match(html, /17\/002\/1\/2020/);
+  assert.match(html, /17\/002\/I\/2020/);
+  assert.match(html, /SITI AMINAH A MD/);
+  assert.match(html, /SITI AMINAH, A\.Md\./);
+  assert.match(html, /normalisasi/);
+  h.api.renderProofreadingDetail();
+  html = h.element('proofread-content').innerHTML;
+  assert.match(html, /Perlu pemeriksaan/);
+  assert.match(html, /Sesuai · Format gelar/);
+  assert.doesNotMatch(html, /0% Mirip/);
+  assert.equal(h.api.approveRecord(record), false);
+  assert.deepEqual(plain({ book: record.book, entry: record.entry }), original);
+  assertPending(h.api, record);
+});
+
+test('matching title typography does not automatically approve a record', () => {
+  const h = setupMain();
+  const record = makeRecord(makeDoc(), {
+    book: { ...fields, namaIstri: 'SITI AMINAH A MD' },
+    entry: { ...fields, namaIstri: 'SITI AMINAH, A.Md.' }
+  });
+  h.select(record);
+  assert.equal(h.api.evaluateVerification(record).isClean, true);
+  assertPending(h.api, record);
+  assert.equal(h.api.approveRecord(record), true);
+  assert.equal(h.api.isApproved(record), true);
+  assert.equal(record.book.namaIstri, 'SITI AMINAH A MD');
+  assert.equal(record.entry.namaIstri, 'SITI AMINAH, A.Md.');
+});
+
 test('real validation compares equivalent dates semantically but still requires explicit approval', () => {
   const h = setupMain();
   const record = makeRecord(makeDoc(), {

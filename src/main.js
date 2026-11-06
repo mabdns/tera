@@ -878,6 +878,8 @@ function renderProofreadingTable() {
       statusBadgeHTML = `<span class="status-cell-badge warning">Belum lengkap</span>`;
     } else if (ev.totalErrors > 0) {
       statusBadgeHTML = `<span class="status-cell-badge issues"><i data-lucide="alert-triangle" style="width: 12px; height: 12px;"></i> ${ev.totalErrors} Selisih</span>`;
+    } else if (ev.evaluations.some(field => field.status === 'review')) {
+      statusBadgeHTML = '<span class="status-cell-badge warning">Perlu pemeriksaan</span>';
     } else if (ev.totalWarnings > 0) {
       statusBadgeHTML = `<span class="status-cell-badge warning"><i data-lucide="alert-circle" style="width: 12px; height: 12px;"></i> Typo</span>`;
     } else {
@@ -895,9 +897,10 @@ function renderProofreadingTable() {
           : `<span class="val-buku-empty">-</span>`;
       }
 
-      const isMatch = ev.evaluations.find(field => field.key === fieldKey)?.status === 'match';
+      const field = ev.evaluations.find(field => field.key === fieldKey);
+      const isMatch = field?.status === 'match';
 
-      if (isMatch) {
+      if (isMatch && !field.normalization) {
         return `<span class="val-buku" style="color: var(--primary-700); font-weight: 600;">${escapeHTML(eStr || bStr || '-')}</span>`;
       }
 
@@ -906,9 +909,10 @@ function renderProofreadingTable() {
           <div style="font-size: 0.68rem; color: var(--text-muted);">
             Scan: <strong style="color: var(--text-main);">${escapeHTML(bStr || '(Kosong)')}</strong>
           </div>
-          <div style="font-size: 0.72rem; color: var(--danger-600); font-weight: 700;">
-            Excel: <span class="val-diff-tag">${escapeHTML(eStr || '(Kosong)')}</span>
+          <div style="font-size: 0.72rem; color: ${isMatch ? 'var(--primary-700)' : field?.status === 'review' ? 'var(--warning-600)' : 'var(--danger-600)'}; font-weight: 700;">
+            Excel: <span class="${isMatch || field?.status === 'review' ? '' : 'val-diff-tag'}">${escapeHTML(eStr || '(Kosong)')}</span>
           </div>
+          ${field?.normalization || field?.status === 'review' ? `<div style="font-size: 0.68rem;">${escapeHTML(field.message)}</div>` : ''}
         </div>
       `;
     };
@@ -1197,14 +1201,14 @@ function renderProofreadingDetail() {
         ${fields.map(f => {
           let rowClass = 'field-item-row';
           if (state.spreadsheetLoaded) {
-            if (f.status === 'typo') rowClass += ' row-typo';
+            if (f.status === 'typo' || f.status === 'review') rowClass += ' row-typo';
             else if (f.status === 'mismatch' || f.status === 'format_error') rowClass += ' row-mismatch';
             else if (f.status === 'empty' || f.status === 'unread' || f.status === 'pending') rowClass += ' row-empty';
           }
 
           const inputClass = state.spreadsheetLoaded && (f.status === 'format_error' || f.status === 'mismatch' || f.status === 'empty')
             ? 'input-has-error'
-            : (state.spreadsheetLoaded && f.status === 'typo' ? 'input-has-warning' : '');
+            : (state.spreadsheetLoaded && (f.status === 'typo' || f.status === 'review') ? 'input-has-warning' : '');
 
           // Render diff representation
           const diffHTML = f.diff.map(d => {
@@ -1217,10 +1221,10 @@ function renderProofreadingDetail() {
             <div class="${rowClass}">
               <div class="f-title-col">
                 <span class="f-name">${f.label}</span>
-                <span class="similarity-badge ${f.similarity === 100 ? 'sim-100' : f.similarity >= 75 ? 'sim-warning' : 'sim-danger'}">
+                <span class="similarity-badge ${f.similarity === 100 ? 'sim-100' : f.status === 'review' || f.similarity >= 75 ? 'sim-warning' : 'sim-danger'}">
                   ${!state.spreadsheetLoaded
                     ? (f.bookValue ? '✓ Terbaca dari Scan' : '⏳ Belum Terdeteksi')
-                    : (f.status === 'unread' ? 'Belum terbaca' : f.status === 'empty' ? 'Belum lengkap' : f.status === 'match' ? '✓ Sesuai' : `${f.similarity}% Mirip`)}
+                    : (f.status === 'unread' ? 'Belum terbaca' : f.status === 'empty' ? 'Belum lengkap' : f.status === 'review' ? 'Perlu pemeriksaan' : f.status === 'match' ? (f.normalization ? '✓ Sesuai · Format gelar' : '✓ Sesuai') : `${f.similarity}% Mirip`)}
                 </span>
               </div>
 
@@ -1245,7 +1249,7 @@ function renderProofreadingDetail() {
                   <span>Entry Spreadsheet:</span>
                   ${!state.spreadsheetLoaded
                     ? `<span style="font-size: 0.65rem; color: var(--text-muted); font-weight: 600;">Belum Diunggah</span>`
-                    : (f.similarity < 100 ? `<span style="font-size: 0.65rem; color: var(--danger-600); font-weight: bold;">Selisih Teks</span>` : '')}
+                    : (f.status === 'review' ? '<span style="font-size: 0.65rem; color: var(--warning-600);">Periksa scan</span>' : f.similarity < 100 ? `<span style="font-size: 0.65rem; color: var(--danger-600); font-weight: bold;">Selisih Teks</span>` : '')}
                 </div>
                 <input
                   type="text"
@@ -1256,7 +1260,7 @@ function renderProofreadingDetail() {
                   placeholder="${!state.spreadsheetLoaded ? 'Unggah file Excel untuk mencocokkan...' : 'Ketik nilai entry spreadsheet...'}"
                 />
                 ${state.spreadsheetLoaded && f.similarity < 100 ? `<div class="diff-preview-box">${diffHTML}</div>` : ''}
-                ${state.spreadsheetLoaded && f.message && f.similarity < 100 ? `<div style="font-size: 0.68rem; color: ${f.severity === 'danger' ? 'var(--danger-600)' : 'var(--warning-600)'}; font-weight: 600;">${f.message}</div>` : ''}
+                ${state.spreadsheetLoaded && f.message && (f.similarity < 100 || f.normalization) ? `<div style="font-size: 0.68rem; color: ${f.severity === 'danger' ? 'var(--danger-600)' : f.severity === 'success' ? 'var(--primary-700)' : 'var(--warning-600)'}; font-weight: 600;">${escapeHTML(f.message)}</div>` : ''}
               </div>
 
               <!-- Action Sync Button -->
