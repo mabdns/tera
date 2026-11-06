@@ -960,7 +960,7 @@ function renderProofreadingTable() {
           <button class="table-filter-btn ${curFilter === 'all' ? 'active' : ''}" data-table-filter="all">
             Semua Dokumen (${state.records.length})
           </button>
-          <button class="table-filter-btn filter-issues ${curFilter === 'issues' ? 'active' : ''}" data-table-filter="issues" style="${issuesCount > 0 ? 'color: var(--danger-600); font-weight: 700;' : ''}">
+          <button class="table-filter-btn filter-issues ${issuesCount > 0 ? 'has-issues' : ''} ${curFilter === 'issues' ? 'active' : ''}" data-table-filter="issues">
             🔴 Ada Selisih / Typo (${issuesCount})
           </button>
           <button class="table-filter-btn ${curFilter === 'clean' ? 'active' : ''}" data-table-filter="clean">

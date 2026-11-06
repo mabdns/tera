@@ -2481,6 +2481,11 @@ body {
   gap: 0.35rem;
 }
 
+.table-filter-btn.filter-issues.has-issues {
+  color: var(--danger-600);
+  font-weight: 700;
+}
+
 .table-filter-btn:hover {
   background: var(--bg-main);
   color: var(--text-main);
@@ -2495,6 +2500,7 @@ body {
 .table-filter-btn.filter-issues.active {
   background: var(--danger-600);
   border-color: var(--danger-600);
+  color: #ffffff;
 }
 
 .table-info-hint {
