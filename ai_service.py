@@ -498,6 +498,20 @@ def process_document(doc_data):
     return response
 
 class TERAHandler(BaseHTTPRequestHandler):
+    def _client_disconnected(self, phase):
+        self.close_connection = True
+        self.log_message("Koneksi klien terputus saat %s; permintaan ditutup.", phase)
+
+    def _write_response(self, status, body=b""):
+        # The browser may abort a timed-out request or close the page while
+        # OCR is running. Never send a second response on that closed socket.
+        try:
+            self._set_cors_headers(status)
+            if body:
+                self.wfile.write(body)
+        except (ConnectionError, TimeoutError):
+            self._client_disconnected("mengirim respons")
+
     def _set_cors_headers(self, status=200, content_type="application/json"):
         self.send_response(status)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -507,7 +521,7 @@ class TERAHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_OPTIONS(self):
-        self._set_cors_headers(200)
+        self._write_response(200)
 
     def do_GET(self):
         if self.path in ["/", "/health"]:
@@ -519,29 +533,37 @@ class TERAHandler(BaseHTTPRequestHandler):
                 "version": "3.0.0 (Geometry-Preserving Anchors)",
                                 "ocrAvailable": ocr_engine is not None
             }
-            self._set_cors_headers(200)
-            self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
+            self._write_response(200, json.dumps(response, indent=2).encode('utf-8'))
         else:
-            self._set_cors_headers(404)
-            self.wfile.write(json.dumps({"error": "Endpoint tidak ditemukan"}).encode('utf-8'))
+            self._write_response(404, json.dumps({"error": "Endpoint tidak ditemukan"}).encode('utf-8'))
 
     def do_POST(self):
         if self.path == "/api/extract":
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length).decode('utf-8')
+                # Limit transport handling to IO: an exception raised by OCR
+                # itself must still be reported as a genuine processing error.
+                try:
+                    raw_body = self.rfile.read(content_length)
+                except (ConnectionError, TimeoutError):
+                    self._client_disconnected("menerima permintaan")
+                    return
+                if len(raw_body) != content_length:
+                    self._client_disconnected("menerima permintaan yang belum lengkap")
+                    return
+                body = raw_body.decode('utf-8')
                 data = json.loads(body)
 
                 res = process_document(data)
-                self._set_cors_headers(200)
-                self.wfile.write(json.dumps(res).encode('utf-8'))
+                encoded = json.dumps(res).encode('utf-8')
+                status = 200
             except Exception as e:
                 traceback.print_exc()
-                self._set_cors_headers(500)
-                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
+                status = 500
+                encoded = json.dumps({"success": False, "error": str(e)}).encode('utf-8')
+            self._write_response(status, encoded)
         else:
-            self._set_cors_headers(404)
-            self.wfile.write(json.dumps({"error": "Endpoint tidak ditemukan"}).encode('utf-8'))
+            self._write_response(404, json.dumps({"error": "Endpoint tidak ditemukan"}).encode('utf-8'))
 
     def log_message(self, format, *args):
         sys.stderr.write(f"[TERA AI] {self.address_string()} - {format % args}\n")
