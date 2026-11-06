@@ -8,14 +8,29 @@ import { createWorker } from 'tesseract.js';
 import { parseKUAFieldsFromText, extractNameFromColumnText } from './pdfViewer.js';
 
 export const LOCAL_AI_URL = 'http://127.0.0.1:8000';
+export const LOCAL_OCR_TIMEOUT_MS = 180_000;
 let healthProbe = null;
 const FIELD_KEYS = ['noAkta', 'tglAkad', 'namaSuami', 'namaIstri'];
+let extractionQueue = Promise.resolve();
+let queuedExtractions = 0;
+const pendingDocuments = new WeakMap();
+
+function enqueueExtraction(task, progressCallback) {
+  if (queuedExtractions > 0 && progressCallback) {
+    progressCallback({ status: 'Menunggu giliran OCR...', progress: 0 });
+  }
+  queuedExtractions++;
+  const result = extractionQueue.then(task);
+  extractionQueue = result.then(() => { queuedExtractions--; }, () => { queuedExtractions--; });
+  return result;
+}
 
 // Bound both the connection and JSON body, including fetch implementations
 // that do not settle immediately when aborted.
 async function requestLocalJSON(path, init, timeoutMs) {
   const controller = new AbortController();
   let timer;
+  let timedOut = false;
   try {
     return await Promise.race([
       (async () => {
@@ -30,11 +45,17 @@ async function requestLocalJSON(path, init, timeoutMs) {
       })(),
       new Promise((resolve, reject) => {
         timer = setTimeout(() => {
-          controller.abort();
+          timedOut = true;
           reject(Object.assign(new Error('OCR lokal melewati batas waktu'), { reason: 'timeout' }));
+          controller.abort();
         }, timeoutMs);
       })
     ]);
+  } catch (error) {
+    // Abort can reject fetch/JSON before its timer promise settles. Preserve
+    // the timeout diagnosis instead of treating it as an offline fallback.
+    if (timedOut) throw Object.assign(new Error('OCR lokal melewati batas waktu'), { reason: 'timeout' });
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -70,6 +91,7 @@ function localResult(payload) {
   return {
     ...payload,
     ...fields,
+    status: 'completed',
     sourceVersion: 2,
     rawText: payload.rawText ?? '',
     source: payload.source ?? 'local',
@@ -86,7 +108,7 @@ async function extractLocal(images, fileName) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName, images })
-    }, 45_000);
+    }, LOCAL_OCR_TIMEOUT_MS);
     if (response.ok && payload?.success === true && payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) {
       return { result: localResult(payload) };
     }
@@ -100,6 +122,7 @@ function reviewResult(local, source = 'tesseract') {
   return {
     ...Object.fromEntries(FIELD_KEYS.map(key => [key, ''])),
     sourceVersion: 2,
+    status: 'completed',
     rawText: '',
     source,
     requiresReview: true,
@@ -111,6 +134,20 @@ function reviewResult(local, source = 'tesseract') {
     ],
     provenance: { reason: local.reason, ...(local.error ? { error: local.error } : {}) },
     ...(local.payload !== undefined ? { localResponse: local.payload } : {})
+  };
+}
+
+function failedLocalResult(local, includeNetwork = false) {
+  if (!['timeout', 'local-error', 'invalid-response', ...(includeNetwork ? ['network-error', 'missing-first-page'] : [])].includes(local.reason)) return null;
+  const message = local.reason === 'timeout'
+    ? 'OCR lokal belum selesai dalam 180 detik. Hasil belum diterima; tidak beralih otomatis ke OCR browser. Tunggu proses lokal selesai lalu ulangi Pindai OCR.'
+    : 'Hasil OCR lokal gagal diterima. Tidak beralih otomatis ke OCR browser; periksa terminal AI lokal lalu ulangi Pindai OCR.';
+  return {
+    ...reviewResult(local, 'local'),
+    status: local.reason === 'timeout' ? 'timeout' : 'failed',
+    error: message,
+    warnings: [message, ...(Array.isArray(local.payload?.warnings) ? local.payload.warnings : []),
+      ...(local.payload?.error ? [String(local.payload.error)] : [])]
   };
 }
 
@@ -216,12 +253,18 @@ export async function preprocessImageForOCR(imageSource) {
 }
 
 // Perform OCR on an image element, canvas, or data URL
-export async function recognizeDocumentText(imageSource, progressCallback) {
+export function recognizeDocumentText(imageSource, progressCallback) {
+  return enqueueExtraction(() => recognizeDocumentTextNow(imageSource, progressCallback), progressCallback);
+}
+
+async function recognizeDocumentTextNow(imageSource, progressCallback) {
   const image = imageDataURL(imageSource);
   const local = image ? await extractLocal([image], 'single_doc') : { reason: 'no-image' };
   if (local.result) {
     return { ...local.result, text: local.result.rawText, words: local.result.words ?? [] };
   }
+  const failed = failedLocalResult(local);
+  if (failed) return { ...failed, text: '' };
   const review = reviewResult(local);
 
   try {
@@ -327,7 +370,7 @@ export async function cropAndBinarizeRegion(imageSource, rect, threshold = 125, 
 }
 
 /**
- * Local-first OCR for Indonesian Akta Nikah, with targeted browser fallback.
+ * Local OCR for Indonesian Akta Nikah, with explicitly selected browser OCR.
  * Browser crops assume a Model N layout: akta box on page 1, registration
  * header and separate spouse columns on page 2. Results require review.
  *
@@ -335,7 +378,17 @@ export async function cropAndBinarizeRegion(imageSource, rect, threshold = 125, 
  * @param {Function} progressCallback - Progress reporting callback
  * @returns {Promise<Object>} Extracted structured KUA fields
  */
-export async function recognizeMultiPageAkta(pdfDoc, progressCallback) {
+export function recognizeMultiPageAkta(pdfDoc, progressCallback, { engine = 'local' } = {}) {
+  if (!pdfDoc || typeof pdfDoc !== 'object') return Promise.resolve(reviewResult({ reason: 'no-image' }, 'none'));
+  if (pendingDocuments.has(pdfDoc)) return pendingDocuments.get(pdfDoc);
+  const result = enqueueExtraction(() => recognizeMultiPageAktaNow(pdfDoc, progressCallback, engine), progressCallback);
+  pendingDocuments.set(pdfDoc, result);
+  const clear = () => pendingDocuments.delete(pdfDoc);
+  result.then(clear, clear);
+  return result;
+}
+
+async function recognizeMultiPageAktaNow(pdfDoc, progressCallback, engine) {
   if (!pdfDoc) return reviewResult({ reason: 'no-image' }, 'none');
 
   // Keep original page positions: a missing page must not turn a different
@@ -348,20 +401,24 @@ export async function recognizeMultiPageAkta(pdfDoc, progressCallback) {
   const images = pages.filter(Boolean);
   if (!images.length) return reviewResult({ reason: 'no-image' }, 'none');
 
-  if (progressCallback) progressCallback({ status: `Memproses AI Lokal (${pdfDoc.fileName})...`, progress: 0.35 });
-  const local = pages[0]
+  if (progressCallback) progressCallback({ status: engine === 'browser'
+    ? `Memproses OCR browser (${pdfDoc.fileName})...`
+    : `Memproses AI Lokal (${pdfDoc.fileName}, batas tunggu 3 menit)...`, progress: 0.35 });
+  const local = engine === 'browser' ? { reason: 'user-selected-browser' } : pages[0]
     ? await extractLocal(images, pdfDoc.fileName)
     : { reason: 'missing-first-page' };
   if (local.result) {
     if (progressCallback) progressCallback({ status: `Selesai AI Lokal (${pdfDoc.fileName})`, progress: 1.0 });
     return local.result;
   }
+  const failed = failedLocalResult(local, true);
+  if (failed) return failed;
 
   let combinedText = '';
   const result = reviewResult(local);
   if (progressCallback) progressCallback({ status: `Memproses Tesseract (${pdfDoc.fileName})...`, progress: 0.1 });
 
-  // Browser OCR is used only for a failed/unavailable local request.
+  // PDF browser OCR requires an explicit user selection.
   try {
     const worker = await getOCRWorker(progressCallback);
 
@@ -463,6 +520,8 @@ export async function recognizeMultiPageAkta(pdfDoc, progressCallback) {
   } catch (err) {
     console.warn(`OCR multi-page error for ${pdfDoc.fileName}:`, err);
     result.warnings.push(err.message);
+    result.status = 'failed';
+    result.error = 'OCR browser gagal membaca dokumen. Periksa scan atau ulangi OCR lokal.';
   }
 
   result.missingFields = FIELD_KEYS.filter(key => !result[key]);

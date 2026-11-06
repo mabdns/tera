@@ -12,6 +12,7 @@ import re
 import json
 import base64
 import traceback
+from itertools import count
 from threading import Lock
 from datetime import date
 from time import perf_counter
@@ -23,6 +24,7 @@ import cv2
 
 # RapidOCR sessions are shared by ThreadingHTTPServer; serialize inference.
 ocr_lock = Lock()
+ocr_request_ids = count(1)
 
 # Initialize RapidOCR Engine
 try:
@@ -486,14 +488,20 @@ def process_document(doc_data):
     decode_ms = (perf_counter() - decode_started) * 1000
     if not any(image is not None for image in images):
         return {"success": False, "error": "Gambar halaman tidak dapat dibaca"}
+    waiting_started = perf_counter()
     with ocr_lock:
+        queue_ms = (perf_counter() - waiting_started) * 1000
+        ocr_started = perf_counter()
         response = extract_layout_document(
             images, ocr_engine, extract_no_akta, extract_tanggal_akad,
             clean_person_name, is_valid_name, split_joined_name,
             refine_header=header_date_candidate, refine_names=refine_spouse_names,
         )
+        ocr_ms = (perf_counter() - ocr_started) * 1000
     response["fileName"] = doc_data.get("fileName", "")
     response["timings"]["decodeMs"] = round(decode_ms, 2)
+    response["timings"]["queueMs"] = round(queue_ms, 2)
+    response["timings"]["ocrMs"] = round(ocr_ms, 2)
     response["timings"]["requestProcessingMs"] = round((perf_counter() - started) * 1000, 2)
     return response
 
@@ -509,8 +517,10 @@ class TERAHandler(BaseHTTPRequestHandler):
             self._set_cors_headers(status)
             if body:
                 self.wfile.write(body)
+            return True
         except (ConnectionError, TimeoutError):
             self._client_disconnected("mengirim respons")
+            return False
 
     def _set_cors_headers(self, status=200, content_type="application/json"):
         self.send_response(status)
@@ -539,6 +549,7 @@ class TERAHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/api/extract":
+            request_id = next(ocr_request_ids)
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
                 # Limit transport handling to IO: an exception raised by OCR
@@ -554,14 +565,23 @@ class TERAHandler(BaseHTTPRequestHandler):
                 body = raw_body.decode('utf-8')
                 data = json.loads(body)
 
+                self.log_message("OCR #%s mulai.", request_id)
                 res = process_document(data)
+                timings = res.get("timings", {})
+                if timings:
+                    self.log_message("OCR #%s selesai: antrean %.2f dtk, proses %.2f dtk, total %.2f dtk.",
+                                     request_id, timings.get("queueMs", 0) / 1000,
+                                     timings.get("ocrMs", 0) / 1000,
+                                     timings.get("requestProcessingMs", 0) / 1000)
                 encoded = json.dumps(res).encode('utf-8')
                 status = 200
             except Exception as e:
                 traceback.print_exc()
                 status = 500
                 encoded = json.dumps({"success": False, "error": str(e)}).encode('utf-8')
-            self._write_response(status, encoded)
+            sent = self._write_response(status, encoded)
+            if sent:
+                self.log_message("OCR #%s respons dikirim (HTTP %s).", request_id, status)
         else:
             self._write_response(404, json.dumps({"error": "Endpoint tidak ditemukan"}).encode('utf-8'))
 

@@ -45,7 +45,8 @@ class HTTPTransportTests(unittest.TestCase):
                     handler.send_response.assert_called_once_with(200)
                     self.assertEqual(stderr.getvalue(), "")
                     self.assertTrue(handler.close_connection)
-                    handler.log_message.assert_called_once()
+                    self.assertTrue(any("Koneksi klien terputus" in c.args[0]
+                                        for c in handler.log_message.call_args_list))
 
     def test_genuine_processing_errors_still_return_500(self):
         for error in (ValueError("OCR failed"), ConnectionAbortedError("engine failed")):
@@ -61,6 +62,26 @@ class HTTPTransportTests(unittest.TestCase):
                 self.assertEqual(payload["error"], str(error))
                 self.assertIn("Traceback", stderr.getvalue())
                 self.assertFalse(handler.close_connection)
+
+    def test_logs_queue_and_processing_duration_separately(self):
+        handler = self.handler()
+        result = {"success": True, "timings": {"queueMs": 1250, "ocrMs": 2500, "requestProcessingMs": 4000}}
+        with patch.object(self.service, "process_document", return_value=result):
+            handler.do_POST()
+        timing = next(c.args for c in handler.log_message.call_args_list if "antrean" in c.args[0])
+        self.assertEqual(timing[2:], (1.25, 2.5, 4.0))
+        self.assertTrue(any("respons dikirim" in c.args[0] for c in handler.log_message.call_args_list))
+
+    def test_processing_response_separates_lock_wait_from_inference_time(self):
+        with patch.object(self.service, "ocr_engine", object()), \
+             patch.object(self.service, "decode_image_base64", return_value=object()), \
+             patch.object(self.service, "extract_layout_document", return_value={"timings": {}}), \
+             patch.object(self.service, "perf_counter", side_effect=[0, 1, 2, 3, 5, 6, 9, 10]):
+            response = self.service.process_document({"images": ["dummy"], "fileName": "test.pdf"})
+        self.assertEqual(response["timings"]["queueMs"], 2000)
+        self.assertEqual(response["timings"]["ocrMs"], 3000)
+        self.assertEqual(response["timings"]["decodeMs"], 1000)
+        self.assertEqual(response["timings"]["requestProcessingMs"], 10000)
 
     def test_disconnected_error_response_is_not_retried(self):
         handler = self.handler(error=BrokenPipeError("closed"))

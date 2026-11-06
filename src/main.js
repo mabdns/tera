@@ -270,8 +270,10 @@ function recordManualChange(rec, side, key, value) {
 }
 
 function evaluateVerification(rec) {
-  const book = rec.requiresReverification
-    ? Object.fromEntries(verificationFields.map(key => [key, rec.bookSources?.[key] ? rec.book?.[key] : '']))
+  const failed = ['failed', 'timeout'].includes(rec.extraction?.status);
+  const book = rec.requiresReverification || failed
+    ? Object.fromEntries(verificationFields.map(key => [key,
+      (failed ? rec.bookSources?.[key] === 'manual' : rec.bookSources?.[key]) ? rec.book?.[key] : '']))
     : rec.book;
   return evaluateRecord(rec.pairingRequired ? {} : book, rec.entry, state.spreadsheetLoaded);
 }
@@ -326,7 +328,9 @@ function applyExtractionResult(rec, incoming = {}) {
 function renderExtractionReview(extraction, rec) {
   if (!extraction && !rec?.requiresReverification) return '';
   const warnings = rec?.requiresReverification ? ['Data sesi lama belum dapat dibuktikan asalnya. Periksa ulang scan atau jalankan OCR.', ...(extraction?.warnings || [])] : (extraction?.warnings || []);
-  return `<div class="legal-alert-box alert-warning"><div><strong>Hasil Ekstraksi — Belum Diperiksa</strong><div>Hasil pembacaan bukan verifikasi atau persetujuan petugas.</div><div>${escapeHTML(extraction?.source || '')}</div>${warnings.map(w => `<div>${escapeHTML(String(w))}</div>`).join('')}<details><summary>Rincian dan saran</summary><pre>${escapeHTML(JSON.stringify({ latestFields: extraction?.latestFields, fieldDetails: extraction?.fieldDetails, timings: extraction?.timings }, null, 2))}</pre></details></div></div>`;
+  const retryActions = rec?.pdfDoc && ['failed', 'timeout'].includes(extraction?.status)
+    ? '<div style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.75rem"><button class="btn btn-secondary btn-sm" id="btn-retry-local-ocr">Ulangi OCR lokal</button><button class="btn btn-secondary btn-sm" id="btn-browser-ocr">Gunakan OCR browser</button></div>' : '';
+  return `<div class="legal-alert-box alert-warning"><div><strong>Hasil Ekstraksi — Belum Diperiksa</strong><div>Hasil pembacaan bukan verifikasi atau persetujuan petugas.</div><div>${escapeHTML(extraction?.source || '')}</div>${warnings.map(w => `<div>${escapeHTML(String(w))}</div>`).join('')}${retryActions}<details><summary>Rincian dan saran</summary><pre>${escapeHTML(JSON.stringify({ latestFields: extraction?.latestFields, fieldDetails: extraction?.fieldDetails, timings: extraction?.timings }, null, 2))}</pre></details></div></div>`;
 }
 
 function migrateLegacyRecord(rec) {
@@ -872,6 +876,8 @@ function renderProofreadingTable() {
       statusBadgeHTML = `<span class="status-cell-badge" style="background: rgba(14, 165, 233, 0.1); color: #0284c7;"><i data-lucide="scan" style="width: 12px; height: 12px;"></i> Belum Diperiksa</span>`;
     } else if (rec.pairingRequired) {
       statusBadgeHTML = `<span class="status-cell-badge warning">Belum dipasangkan</span>`;
+    } else if (['failed', 'timeout'].includes(rec.extraction?.status) && ev.evaluations.some(field => field.status === 'unread')) {
+      statusBadgeHTML = `<span class="status-cell-badge warning">${rec.extraction.status === 'timeout' ? 'OCR melewati batas waktu' : 'OCR lokal gagal'}</span>`;
     } else if (rec.requiresReverification || ev.evaluations.some(field => field.status === 'unread')) {
       statusBadgeHTML = `<span class="status-cell-badge warning">Belum terbaca</span>`;
     } else if (ev.evaluations.some(field => field.status === 'empty')) {
@@ -1412,19 +1418,20 @@ function renderProofreadingDetail() {
   });
 
   // Attach Single Document OCR Trigger
-  const singleOcrBtn = document.getElementById('btn-trigger-single-ocr');
-  if (singleOcrBtn && currentRec.pdfDoc) {
+  for (const [buttonId, engine] of [['btn-trigger-single-ocr', 'local'], ['btn-retry-local-ocr', 'local'], ['btn-browser-ocr', 'browser']]) {
+    const singleOcrBtn = document.getElementById(buttonId);
+    if (!singleOcrBtn || !currentRec.pdfDoc) continue;
     singleOcrBtn.addEventListener('click', async () => {
       singleOcrBtn.disabled = true;
       singleOcrBtn.innerHTML = `<span style="font-size: 0.72rem;">⏳ Memindai OCR...</span>`;
       try {
         const pdfDoc = currentRec.pdfDoc;
-        const ext = await recognizeMultiPageAkta(pdfDoc);
+        const ext = await recognizeMultiPageAkta(pdfDoc, undefined, { engine });
         if (!isCurrentDocument(currentRec, pdfDoc)) return;
         const updated = applyExtractionResult(currentRec, ext || {});
         renderProofreadingInspector();
         updateStats();
-        showNotification('Hasil OCR', updated ? 'Hasil pembacaan tersedia dan menunggu pemeriksaan petugas.' : 'Tidak ditemukan teks baru. Periksa scan secara manual.', 'info');
+        showNotification('Hasil OCR', ext?.error || (updated ? 'Hasil pembacaan tersedia dan menunggu pemeriksaan petugas.' : 'Tidak ditemukan teks baru. Periksa scan secara manual.'), ext?.error ? 'warning' : 'info');
       } catch (err) {
         alert(`Gagal memindai OCR: ${err.message}`);
       } finally {
@@ -2009,7 +2016,11 @@ function setupEvents() {
             triggerAutoSave();
             alert(`OCR Berhasil Mendeteksi Teks:\n\n${res.text.slice(0, 300)}...`);
           } else {
-            alert('Teks pada foto kurang terbaca atau blur.');
+            if (['failed', 'timeout'].includes(res.status)) {
+              applyExtractionResult(currentRec, res);
+              renderAll();
+            }
+            alert(res.error || 'Teks pada foto kurang terbaca atau blur.');
           }
         }
       }
@@ -2250,13 +2261,15 @@ function setupEvents() {
       if (aiStatus.available) {
         modalTitle.innerHTML = '⚡ Ekstraksi AI Lokal ';
       } else {
-        modalTitle.innerHTML = 'Ekstraksi Teks (Browser OCR Tesseract)';
+        modalTitle.innerHTML = 'OCR Lokal — Periksa Koneksi';
       }
     }
 
     const total = state.records.length;
     let processed = 0;
     let extractedCount = 0;
+    let failedCount = 0;
+    let pausedForLocalFailure = false;
 
     try {
       for (let i = 0; i < total; i++) {
@@ -2291,7 +2304,8 @@ function setupEvents() {
           }
 
           // 3. Multi-page OCR extraction: Run if ANY of the 4 essential fields is missing
-          const needsOCR = !extractedData.namaSuami || !extractedData.noAkta || !extractedData.namaIstri || !extractedData.tglAkad;
+          const needsOCR = ['failed', 'timeout'].includes(extractedData.status)
+            || !extractedData.namaSuami || !extractedData.noAkta || !extractedData.namaIstri || !extractedData.tglAkad;
           if (needsOCR && (rendered || rec.pdfDoc)) {
             const targetDoc = rec.pdfDoc || (rendered ? { ...rendered, fileName: docName } : null);
             if (targetDoc) {
@@ -2308,13 +2322,22 @@ function setupEvents() {
           }
 
           if (pdfDoc && isCurrentDocument(rec, pdfDoc)) {
-            if (applyExtractionResult(rec, extractedData)) extractedCount++;
+            const extracted = applyExtractionResult(rec, extractedData);
+            if (['failed', 'timeout'].includes(extractedData.status)) {
+              failedCount++;
+              pausedForLocalFailure = extractedData.source === 'local';
+            }
+            else if (extracted) extractedCount++;
           }
         } catch (fileErr) {
           console.warn(`Gagal OCR pada berkas ${docName}:`, fileErr);
+          failedCount++;
         }
 
         processed++;
+        // A timed-out server can still be finishing the previous job. Pause
+        // the batch instead of accumulating more work behind that request.
+        if (pausedForLocalFailure) break;
         // Periodic live UI refresh
         if (processed % 5 === 0 || processed === total) {
           try {
@@ -2329,13 +2352,15 @@ function setupEvents() {
       }
 
       if (batchStatusText) {
-        batchStatusText.innerText = `Selesai! ${extractedCount} dari ${processed} berkas berhasil diekstrak.`;
+        batchStatusText.innerText = `${pausedForLocalFailure ? 'Dijeda karena OCR lokal gagal.' : 'Selesai!'} ${extractedCount} dari ${processed} berkas berhasil diekstrak.${failedCount ? ` ${failedCount} berkas gagal atau melewati batas waktu; silakan ulangi OCR.` : ''}`;
       }
       if (batchCurrentDoc) {
-        batchCurrentDoc.innerHTML = `✅ Ekstraksi selesai. Data siap diperiksa dan diekspor ke <strong>Template Arsip (PW.01)</strong>.`;
+        batchCurrentDoc.innerHTML = pausedForLocalFailure
+          ? 'Antrean batch dihentikan. Periksa terminal AI lokal dan tunggu proses selesai sebelum mengulangi OCR.'
+          : `✅ Ekstraksi selesai. Data siap diperiksa dan diekspor ke <strong>Template Arsip (PW.01)</strong>.`;
       }
 
-      showNotification('Ekstraksi OCR Selesai', `${extractedCount} dari ${processed} berkas berhasil diekstrak.`, 'success', 4500);
+      showNotification(pausedForLocalFailure ? 'Ekstraksi OCR Dijeda' : 'Ekstraksi OCR Selesai', `${extractedCount} dari ${processed} berkas berhasil diekstrak.`, pausedForLocalFailure || failedCount ? 'warning' : 'success', 4500);
 
       renderAll();
       triggerAutoSave();

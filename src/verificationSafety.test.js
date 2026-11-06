@@ -83,9 +83,9 @@ function setupMain(options = {}) {
     },
     evaluateRecord, calculateSimilarity, normalizeDateToStandard, parseSpreadsheet,
     checkLocalAIService: async () => ({ available: false, reason: 'test: no network' }),
-    recognizeMultiPageAkta: async doc => {
+    recognizeMultiPageAkta: async (doc, _progress, mode) => {
       calls.ocr.push(doc.id);
-      if (options.recognize) return options.recognize(doc);
+      if (options.recognize) return options.recognize(doc, mode);
       return plain(options.ocrResult ?? { ...empty, ...metadata });
     },
     renderPDFDocPage: async index => {
@@ -255,6 +255,66 @@ test('matching title typography does not automatically approve a record', () => 
   assert.equal(record.book.namaIstri, 'SITI AMINAH A MD');
   assert.equal(record.entry.namaIstri, 'SITI AMINAH, A.Md.');
 });
+
+test('timed-out extraction preserves data but cannot validate stale OCR and can be retried', () => {
+  const h = setupMain();
+  const record = makeRecord(makeDoc(), {book:{...fields},bookSources:Object.fromEntries(keys.map(k=>[k,'ocr']))});
+  h.select(record);
+  const original=plain({book:record.book,entry:record.entry,originalEntry:record.originalEntry});
+  assert.equal(h.api.evaluateVerification(record).isClean,true);
+  h.api.applyExtractionResult(record,{...empty,status:'timeout',source:'local',warnings:['OCR lokal belum selesai']});
+  assert.deepEqual(plain({book:record.book,entry:record.entry,originalEntry:record.originalEntry}),original);
+  assert.equal(h.api.evaluateVerification(record).isClean,false);
+  assert.equal(h.api.approveRecord(record),false);
+  h.api.renderProofreadingTable();
+  assert.match(h.element('proofread-content').innerHTML,/OCR melewati batas waktu/);
+  h.api.renderProofreadingDetail();
+  assert.match(h.element('proofread-content').innerHTML,/Ulangi OCR lokal/);
+  assert.match(h.element('proofread-content').innerHTML,/Gunakan OCR browser/);
+  h.api.applyExtractionResult(record,{...fields,status:'completed',source:'local'});
+  assert.equal(h.api.evaluateVerification(record).isClean,true);
+  assertPending(h.api,record);
+});
+
+test('a failed extraction does not discard reviewed manual transcription', () => {
+  const h=setupMain();
+  const record=makeRecord(makeDoc(),{book:{...fields},bookSources:Object.fromEntries(keys.map(k=>[k,'manual']))});
+  h.select(record);
+  h.api.applyExtractionResult(record,{...empty,status:'failed',source:'local'});
+  assert.deepEqual(plain(record.book),fields);
+  assert.equal(h.api.evaluateVerification(record).isClean,true);
+  assertPending(h.api,record);
+});
+
+test('batch pauses after a local timeout instead of queuing the next document', async () => {
+  const docs=[makeDoc(0),makeDoc(1)];
+  const h=setupMain({docs,ocrResult:{...empty,status:'timeout',source:'local',warnings:['Terlambat']}});
+  const records=docs.map(doc=>makeRecord(doc));
+  h.select(records[0]);
+  h.api.state.records=records;
+  await h.element('btn-batch-ocr').handlers.click();
+  assert.deepEqual(h.calls.ocr,[docs[0].id]);
+  assert.match(h.element('batch-ocr-status-text').innerText,/Dijeda/);
+  assert.match(h.element('batch-ocr-status-text').innerText,/0 dari 1/);
+  assert.equal(records[0].extraction.status,'timeout');
+  assert.equal(records[1].extraction,undefined);
+  assertPending(h.api,records[0]);
+});
+
+for (const [button, engine] of [['btn-retry-local-ocr','local'],['btn-browser-ocr','browser']]) {
+  test(`${button} retries using only the engine explicitly selected by the user`, async () => {
+    let selected;
+    const h=setupMain({recognize:(_doc,mode)=>{selected=mode.engine;return {...fields,status:'completed',source:engine};}});
+    const record=makeRecord(makeDoc(),{extraction:{status:'failed',source:'local'}});
+    h.select(record);
+    h.api.renderProofreadingDetail();
+    await h.element(button).handlers.click();
+    assert.equal(selected,engine);
+    assert.equal(record.extraction.status,'completed');
+    assert.equal(h.api.evaluateVerification(record).isClean,true);
+    assertPending(h.api,record);
+  });
+}
 
 test('real validation compares equivalent dates semantically but still requires explicit approval', () => {
   const h = setupMain();

@@ -88,6 +88,18 @@ const doc = {
   dataURL: 'data:application/pdf;base64,not-an-image',
   pageImages: [1, 2, 3].map(n => ({ dataURL: `data:image/png;base64,page${n}` }))
 };
+
+test('missing first scan does not silently select browser OCR', async () => {
+  const { helper, calls } = await setup();
+  const result = await helper.recognizeMultiPageAkta({
+    fileName: 'missing-front.pdf',
+    pageImages: [null, doc.pageImages[1]]
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.provenance.reason, 'missing-first-page');
+  assert.equal(calls.requests.length, 0);
+  assert.equal(calls.workers, 0);
+});
 const emptyFields = { noAkta: '', tglAkad: '', namaSuami: '', namaIstri: '' };
 const jsonResponse = (payload, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -125,7 +137,7 @@ test('posts only the first two image data URLs and preserves local metadata', as
   assert.equal(result.source, 'local');
   assert.equal(result.requiresReview, true);
   assert.deepEqual(result.missingFields, []);
-  assert.deepEqual(calls.delays, [45_000]);
+  assert.deepEqual(calls.delays, [180_000]);
   assert.equal(calls.cleared, 1);
 });
 
@@ -141,47 +153,61 @@ for (const data of [emptyFields, {}, { namaSuami: 'ANDI' }]) {
   });
 }
 
-test('offline fallback never fabricates fields from a numeric filename', async () => {
+test('explicit browser OCR never fabricates fields from a numeric filename', async () => {
   const { helper, calls } = await setup();
   const progress = [];
-  const result = await helper.recognizeMultiPageAkta(doc, value => progress.push(value));
+  const result = await helper.recognizeMultiPageAkta(doc, value => progress.push(value), {engine:'browser'});
   assertEmpty(result);
   assert.equal(calls.workers, 1);
   assert.equal(result.source, 'tesseract');
-  assert.equal(result.provenance.reason, 'network-error');
+  assert.equal(result.provenance.reason, 'user-selected-browser');
+  assert.equal(calls.requests.length,0);
   assert.equal(result.requiresReview, true);
   assert.match(result.warnings[0], /Tesseract.*wajib ditinjau/);
   assert.ok(progress.some(value => value.status.includes('Tesseract')));
 });
 
+test('unreachable local OCR fails visibly instead of silently switching engines', async () => {
+  const {helper,calls}=await setup();
+  const result=await helper.recognizeMultiPageAkta(doc);
+  assert.equal(result.status,'failed');
+  assert.equal(result.provenance.reason,'network-error');
+  assert.equal(calls.workers,0);
+  assertEmpty(result);
+});
+
 for (const status of [200, 503]) {
   test(`handles unavailable model/success false at HTTP ${status}`, async () => {
     const payload = { success: false, error: 'Model unavailable', warnings: ['Model belum dimuat'], timings: { total: 0 } };
-    const { helper } = await setup({ fetch: async () => jsonResponse(payload, status) });
+    const { helper, calls } = await setup({ fetch: async () => jsonResponse(payload, status) });
     const result = await helper.recognizeMultiPageAkta(doc);
     assertEmpty(result);
-    assert.equal(result.source, 'tesseract');
+    assert.equal(result.source, 'local');
+    assert.equal(result.status, 'failed');
+    assert.equal(calls.workers, 0);
     assert.deepEqual(result.localResponse, payload);
     assert.ok(result.warnings.includes('Model belum dimuat'));
     assert.ok(result.warnings.some(warning => warning.includes('Model unavailable')));
   });
 }
 
-test('non-JSON and invalid successful envelopes fall back explicitly', async () => {
+test('non-JSON and invalid local responses fail explicitly without browser OCR', async () => {
   for (const response of [
     { ok: false, status: 502, json: async () => { throw new SyntaxError('not JSON'); } },
     jsonResponse({ success: true, data: null })
   ]) {
-    const { helper } = await setup({ fetch: async () => response });
+    const { helper, calls } = await setup({ fetch: async () => response });
     const result = await helper.recognizeMultiPageAkta(doc);
-    assert.equal(result.source, 'tesseract');
+    assert.equal(result.source, 'local');
+    assert.equal(result.status, 'failed');
+    assert.equal(calls.workers, 0);
     assert.equal(result.provenance.reason, 'invalid-response');
     assertEmpty(result);
   }
 });
 
 for (const stallBody of [false, true]) {
-  test(`45-second bound aborts ${stallBody ? 'stalled JSON body' : 'stalled fetch'}`, async () => {
+  test(`three-minute bound aborts ${stallBody ? 'stalled JSON body' : 'stalled fetch'} without switching OCR engines`, async () => {
     const { helper, calls } = await setup({
       fastTimeout: true,
       fetch: async () => stallBody
@@ -190,11 +216,74 @@ for (const stallBody of [false, true]) {
     });
     const result = await helper.recognizeMultiPageAkta(doc);
     assert.equal(result.provenance.reason, 'timeout');
+    assert.equal(result.status, 'timeout');
+    assert.equal(result.source, 'local');
+    assert.equal(calls.workers, 0);
+    assertEmpty(result);
+    assert.ok(result.warnings.some(w=>w.includes('180 detik')));
     assert.equal(calls.requests[0].signal.aborted, true);
-    assert.deepEqual(calls.delays, [45_000]);
+    assert.deepEqual(calls.delays, [180_000]);
     assert.equal(calls.cleared, 1);
   });
 }
+
+test('simultaneous automatic and batch requests for the same document share one extraction', async () => {
+  let finish;
+  const {helper,calls}=await setup({fetch:()=>new Promise(resolve=>{finish=resolve;})});
+  const first=helper.recognizeMultiPageAkta(doc);
+  const second=helper.recognizeMultiPageAkta(doc);
+  assert.equal(first,second);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.requests.length,1);
+  finish(jsonResponse({success:true,data:{namaSuami:'BUDI'}}));
+  assert.equal((await first).namaSuami,'BUDI');
+  assert.equal(await second,await first);
+  const repeat=helper.recognizeMultiPageAkta(doc);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.requests.length,2,'a later explicit retry must not reuse a completed result');
+  finish(jsonResponse({success:true,data:{namaSuami:'ANDI'}}));
+  assert.equal((await repeat).namaSuami,'ANDI');
+});
+
+test('different documents wait in order and start their timeout only after reaching the queue head', async () => {
+  const finish=[];
+  const {helper,calls}=await setup({fetch:()=>new Promise(resolve=>finish.push(resolve))});
+  const first=helper.recognizeMultiPageAkta({...doc,fileName:'a.pdf'});
+  const progress=[];
+  const second=helper.recognizeMultiPageAkta({...doc,fileName:'b.pdf'},p=>progress.push(p));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.requests.length,1);
+  assert.equal(calls.delays.length,1);
+  assert.ok(progress.some(p=>p.status.includes('Menunggu giliran')));
+  finish[0](jsonResponse({success:true,data:{namaSuami:'BUDI'}}));
+  assert.equal((await first).namaSuami,'BUDI');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.requests.length,2);
+  assert.equal(calls.delays.length,2);
+  finish[1](jsonResponse({success:true,data:{namaSuami:'ANDI'}}));
+  assert.equal((await second).namaSuami,'ANDI');
+});
+
+test('an abort rejection during timeout is still classified as timeout', async () => {
+  const {helper,calls}=await setup({fastTimeout:true,fetch:(_url,init)=>new Promise((_resolve,reject)=>{
+    init.signal.addEventListener('abort',()=>reject(Object.assign(new Error('Aborted'),{name:'AbortError'})));
+  })});
+  const result=await helper.recognizeMultiPageAkta(doc);
+  assert.equal(result.status,'timeout');
+  assert.equal(result.provenance.reason,'timeout');
+  assert.equal(calls.workers,0);
+});
+
+test('queued extraction still runs after a preceding timeout', async () => {
+  let requests=0;
+  const {helper,calls}=await setup({fastTimeout:true,fetch:()=>++requests===1
+    ?new Promise(()=>{}):Promise.resolve(jsonResponse({success:true,data:{namaSuami:'BUDI'}}))});
+  const first=helper.recognizeMultiPageAkta({...doc,fileName:'a.pdf'});
+  const second=helper.recognizeMultiPageAkta({...doc,fileName:'b.pdf'});
+  assert.equal((await first).status,'timeout');
+  assert.equal((await second).namaSuami,'BUDI');
+  assert.equal(calls.requests.length,2);
+});
 
 test('missing images/PDF bytes are not sent to the image-only API', async () => {
   const { helper, calls } = await setup();
@@ -218,7 +307,7 @@ test('single image dataURL is accepted without assuming a PDF API', async () => 
 test('fallback extracts real OCR text without filename-based replacement', async () => {
   const text = 'Nomor Akta 23/004/I/2020\nTanggal Akad 02-01-2020\nNama Suami: ANDI\nNama Istri: SITI';
   const { helper } = await setup({ texts: [text] });
-  const result = await helper.recognizeMultiPageAkta({ ...doc, pageImages: doc.pageImages.slice(0, 1) });
+  const result = await helper.recognizeMultiPageAkta({ ...doc, pageImages: doc.pageImages.slice(0, 1) }, undefined, {engine:'browser'});
   assert.equal(result.noAkta, '23/004/I/2020');
   assert.equal(result.tglAkad, '02-01-2020');
   assert.equal(result.namaSuami, 'ANDI');
@@ -229,7 +318,7 @@ test('fallback extracts real OCR text without filename-based replacement', async
 
 test('missing husband name is not copied from the combined wife column', async () => {
   const { helper, calls } = await setup({ texts: ['', '', '', 'Nama lengkap: SITI'] });
-  const result = await helper.recognizeMultiPageAkta(doc);
+  const result = await helper.recognizeMultiPageAkta(doc, undefined, {engine:'browser'});
   assert.equal(result.namaSuami, '');
   assert.equal(result.namaIstri, 'SITI');
   const left = calls.crops[2];
@@ -239,7 +328,7 @@ test('missing husband name is not copied from the combined wife column', async (
 
 test('failed name crops do not OCR the original full page', async () => {
   const { helper, calls } = await setup({ failImage: count => count >= 3 });
-  const result = await helper.recognizeMultiPageAkta(doc);
+  const result = await helper.recognizeMultiPageAkta(doc, undefined, {engine:'browser'});
   assert.equal(calls.recognizes.length, 2);
   assert.equal(result.namaSuami, '');
   assert.equal(result.namaIstri, '');
@@ -247,7 +336,7 @@ test('failed name crops do not OCR the original full page', async () => {
 
 test('Tesseract failure remains empty and carries review warnings', async () => {
   const { helper } = await setup({ workerError: 'OCR worker unavailable' });
-  const result = await helper.recognizeMultiPageAkta(doc);
+  const result = await helper.recognizeMultiPageAkta(doc, undefined, {engine:'browser'});
   assertEmpty(result);
   assert.equal(result.requiresReview, true);
   assert.ok(result.warnings.some(warning => warning.includes('OCR worker unavailable')));
