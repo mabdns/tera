@@ -1,0 +1,2 @@
+# RapidOCR version used for the real PDF regression tests.
+rapidocr-onnxruntime==1.4.4

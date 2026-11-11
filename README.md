@@ -79,6 +79,26 @@ Buka browser dan akses: **`http://localhost:5173/`**
 npm run build
 ```
 
+### Menyamakan versi mesin OCR lokal di Windows
+
+Versi RapidOCR untuk pengujian scan TERA ditetapkan pada **1.4.4** di
+`requirements-ocr.txt`. Memperbarui kode dengan Git tidak memperbarui paket Python.
+Versi RapidOCR yang berbeda dapat menghasilkan pembacaan berbeda pada scan yang sama.
+
+1. Hentikan layanan AI lokal dengan **Ctrl+C**.
+2. Jalankan **perbarui_mesin_ocr.bat** dari folder proyek. Langkah ini membutuhkan internet.
+3. Pastikan proses selesai dan menampilkan `RapidOCR terpasang: 1.4.4`.
+4. Jalankan kembali **jalankan_ai_lokal.bat**. Terminal menampilkan lokasi Python dan versi RapidOCR.
+5. Di aplikasi, pilih dokumen lalu **Detail Akta → Pindai OCR** untuk menghasilkan pembacaan baru.
+   Hasil tersimpan tidak berubah hanya karena paket diperbarui.
+
+Kedua skrip memilih `.venv\Scripts\python.exe` bila tersedia, lalu `py`, lalu
+`python`. Pembaruan menggunakan interpreter yang sama dengan peluncur layanan.
+Skrip berpindah ke foldernya sendiri sehingga lokasi terminal awal tidak mengubah
+pilihan lingkungan. Skrip tidak membuat lingkungan baru atau menghapus sesi koreksi.
+Pembaruan ini menyamakan RapidOCR; Python dan dependensi lain tetap perlu diperiksa
+melalui **Rincian dan saran → runtime** bila hasil masih berbeda.
+
 ---
 
 ## ⌨️ Shortcut Keyboard Cepat
