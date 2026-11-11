@@ -400,6 +400,24 @@ test('Excel upload retains manual book work and snapshots the actual new import'
   assertPending(h.api, record);
 });
 
+test('successful reread clears rejected OCR labels and stale fields, preserving manual data and Excel', () => {
+  const { api, select } = setupMain();
+  const record = makeRecord(makeDoc(), {book:{...fields, namaSuami:'TEMPATDANTANGGALLAHIR'},
+    bookSources:Object.fromEntries(keys.map(k=>[k,k==='namaIstri'?'manual':'ocr']))});
+  record.extraction={...record.book,status:'completed'};
+  select(record);
+  const entry=plain(record.entry), original=plain(record.originalEntry);
+  api.applyExtractionResult(record,{...empty,noAkta:fields.noAkta,namaSuami:'TEMPATDANTANGGALLAHIR',status:'completed'});
+  assert.equal(record.book.namaSuami,'');
+  assert.equal(record.book.tglAkad,'');
+  assert.equal(record.book.namaIstri,fields.namaIstri);
+  assert.equal(record.extraction.namaSuami,'');
+  assert.equal(record.extraction.tglAkad,'');
+  assert.match(record.extraction.warnings.join(' '),/Label formulir ditolak/);
+  assertIndependent(record,entry,original);
+  assertPending(api,record);
+});
+
 for (const result of [{ ...empty, ...metadata }, {
   ...empty, ...metadata, noAkta: 'OCR AKTA', namaSuami: 'OCR SUAMI', namaIstri: 'OCR ISTRI'
 }]) {

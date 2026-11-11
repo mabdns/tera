@@ -101,6 +101,14 @@ def load_service_without_models():
 
 
 class ServiceNameCleaningTests(unittest.TestCase):
+    def test_joined_form_labels_are_not_people(self):
+        service = load_service_without_models()
+        for text in ('TEMPATDANTANGGALLAHIR', 'Tempat.dan.Tanggal.Lahir',
+                     'TEMPATTANGGALLAHIR', 'NOMORINDUKKEPENDUDUKAN', 'NAMA LENGKAP'):
+            self.assertFalse(service.is_valid_name(text), text)
+        for text in ('ACH. TAUFAN', 'SULIS ARINI', 'NAMAIRA PUTRI'):
+            self.assertTrue(service.is_valid_name(text), text)
+
     def test_mixed_form_rule_dashes_do_not_change_name_votes(self):
         service = load_service_without_models()
         for suffix in ("---", "-—", "---–", "−"):
@@ -110,6 +118,11 @@ class ServiceNameCleaningTests(unittest.TestCase):
 
 
 class NameLayoutTests(unittest.TestCase):
+    def test_joined_next_item_label_is_rejected_with_permissive_validator(self):
+        value, detail = self.extract([[box('SUAMI')], [box('Nama lengkap: TEMPATDANTANGGALLAHIR', y=70)]])
+        self.assertEqual(value, '')
+        self.assertIn('invalid_name_region', detail['warnings'])
+
     def test_joined_name_label_remains_an_explicit_anchor(self):
         for label in ("1.Namalengkap", "Nama lengkap", "Narnaleugkap", "1Namalengkap", "lNama lengkap", "INama lengkap"):
             with self.subTest(label=label):

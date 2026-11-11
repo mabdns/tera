@@ -240,7 +240,7 @@ function mergeExtractedData(previous = {}, incoming = {}) {
   for (const key of verificationFields) {
     const value = String(incoming[key] ?? '').trim();
     merged.latestFields[key] = incoming.latestFields?.[key] ?? value;
-    merged[key] = value || previous[key] || '';
+    merged[key] = incoming.status === 'completed' ? value : value || previous[key] || '';
   }
   return merged;
 }
@@ -301,6 +301,16 @@ function approveRecord(rec) {
 }
 
 function applyExtractionResult(rec, incoming = {}) {
+  incoming = { ...incoming };
+  for (const key of ['namaSuami', 'namaIstri']) {
+    const compact = String(incoming[key] ?? '').toUpperCase().replace(/[^A-Z]/g, '');
+    if (['TEMPATDANTANGGALLAHIR', 'TEMPATTANGGALLAHIR', 'NAMALENGKAP',
+      'NOMORINDUKKEPENDUDUKAN', 'ORANGTUAAYAHKANDUNG', 'ORANGTUAIBUKANDUNG'].some(label => compact.includes(label))) {
+      incoming[key] = '';
+      incoming.latestFields = { ...incoming.latestFields, [key]: '' };
+      incoming.warnings = [...(incoming.warnings || []), `Label formulir ditolak sebagai nama (${key}); periksa scan.`];
+    }
+  }
   invalidateApproval(rec, 'Pembacaan dokumen diperbarui');
   const previous = rec.extraction || rec.pdfDoc?.extracted || {};
   const extracted = { ...mergeExtractedData(previous, incoming), sourceVersion };
@@ -308,7 +318,7 @@ function applyExtractionResult(rec, incoming = {}) {
   rec.bookSources ||= {};
   for (const key of verificationFields) {
     const value = String(incoming[key] ?? '').trim();
-    if (value && (!rec.book[key] || rec.bookSources[key] === 'ocr' || (rec.requiresReverification && !rec.bookSources[key]))) {
+    if ((value || incoming.status === 'completed') && (!rec.book[key] || rec.bookSources[key] === 'ocr' || (rec.requiresReverification && !rec.bookSources[key]))) {
       rec.book[key] = value;
       rec.bookSources[key] = 'ocr';
     }
@@ -330,7 +340,7 @@ function renderExtractionReview(extraction, rec) {
   const warnings = rec?.requiresReverification ? ['Data sesi lama belum dapat dibuktikan asalnya. Periksa ulang scan atau jalankan OCR.', ...(extraction?.warnings || [])] : (extraction?.warnings || []);
   const retryActions = rec?.pdfDoc && ['failed', 'timeout'].includes(extraction?.status)
     ? '<div style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.75rem"><button class="btn btn-secondary btn-sm" id="btn-retry-local-ocr">Ulangi OCR lokal</button><button class="btn btn-secondary btn-sm" id="btn-browser-ocr">Gunakan OCR browser</button></div>' : '';
-  return `<div class="legal-alert-box alert-warning"><div><strong>Hasil Ekstraksi — Belum Diperiksa</strong><div>Hasil pembacaan bukan verifikasi atau persetujuan petugas.</div><div>${escapeHTML(extraction?.source || '')}</div>${warnings.map(w => `<div>${escapeHTML(String(w))}</div>`).join('')}${retryActions}<details><summary>Rincian dan saran</summary><pre>${escapeHTML(JSON.stringify({ latestFields: extraction?.latestFields, fieldDetails: extraction?.fieldDetails, timings: extraction?.timings }, null, 2))}</pre></details></div></div>`;
+  return `<div class="legal-alert-box alert-warning"><div><strong>Hasil Ekstraksi — Belum Diperiksa</strong><div>Hasil pembacaan bukan verifikasi atau persetujuan petugas.</div><div>${escapeHTML(extraction?.source || '')}</div>${warnings.map(w => `<div>${escapeHTML(String(w))}</div>`).join('')}${retryActions}<details><summary>Rincian dan saran</summary><pre>${escapeHTML(JSON.stringify({ runtime: extraction?.runtime, latestFields: extraction?.latestFields, fieldDetails: extraction?.fieldDetails, timings: extraction?.timings }, null, 2))}</pre></details></div></div>`;
 }
 
 function migrateLegacyRecord(rec) {

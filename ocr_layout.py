@@ -21,6 +21,14 @@ HEADER_WORDS = re.compile(
 )
 
 
+def is_form_label(text):
+    """OCR can concatenate form labels; whitespace is not a reliable boundary."""
+    compact = re.sub(r'[^A-Z]', '', str(text).upper())
+    return any(label in compact for label in (
+        'TEMPATDANTANGGALLAHIR', 'TEMPATTANGGALLAHIR', 'NAMALENGKAP',
+        'NOMORINDUKKEPENDUDUKAN', 'ORANGTUAAYAHKANDUNG', 'ORANGTUAIBUKANDUNG'))
+
+
 def prepare_page(image):
     """Conservatively remove a dark scanner surround and deskew long printed lines."""
     original_h, original_w = image.shape[:2]
@@ -276,7 +284,7 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
             previous = box
         raw = " ".join(p for p in pieces if p).strip(" :.-=")
         aligned_previous = False
-        if (not raw or HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or re.search(r'\d', raw) or not valid_name(raw)) and index > 0:
+        if (not raw or is_form_label(raw) or HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or re.search(r'\d', raw) or not valid_name(raw)) and index > 0:
             # A sloped form can put the value slightly above its left-hand
             # label, creating two OCR rows. Accept only the immediately prior
             # row, to the right of the label, within the same vertical band.
@@ -298,7 +306,7 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
                         break
                     prior_selected.append(candidate)
                 prior_raw = " ".join(b.get("text", "") for b in prior_selected).strip(" :.-=")
-                if valid_name(prior_raw) and not HEADER_WORDS.search(prior_raw) and not NEXT_ITEM.search(prior_raw) and not ROLE.search(prior_raw):
+                if valid_name(prior_raw) and not is_form_label(prior_raw) and not HEADER_WORDS.search(prior_raw) and not NEXT_ITEM.search(prior_raw) and not ROLE.search(prior_raw):
                     raw, selected = prior_raw, prior_selected
                     aligned_previous = True
         if not raw and index + 1 < len(rows):
@@ -324,7 +332,7 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
             warnings.append("name_value_above_label_check_alignment")
         if role is None:
             warnings.append("role_anchor_missing")
-        if HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or re.search(r'\d', raw) or not valid_name(raw):
+        if is_form_label(raw) or HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or re.search(r'\d', raw) or not valid_name(raw):
             return "", {"rawText": raw, "status": "review",
                         "warnings": warnings + ["invalid_name_region"]}
         value = clean_name(raw)

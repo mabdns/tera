@@ -12,11 +12,14 @@ import re
 import json
 import base64
 import traceback
+import hashlib
+from pathlib import Path
+from importlib.metadata import version, PackageNotFoundError
 from itertools import count
 from threading import Lock
 from datetime import date
 from time import perf_counter
-from ocr_layout import extract_layout_document
+from ocr_layout import extract_layout_document, is_form_label
 from ocr_regions import header_date_candidate, refine_spouse_names, number_region_candidate
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
@@ -25,6 +28,26 @@ import cv2
 # RapidOCR sessions are shared by ThreadingHTTPServer; serialize inference.
 ocr_lock = Lock()
 ocr_request_ids = count(1)
+
+# Capture the running code once: pulling files without restarting the service
+# must not make its reported revision look newer than the loaded process.
+def runtime_identity():
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in ('ai_service.py', 'ocr_layout.py', 'ocr_regions.py', 'ocr_refine.mjs'):
+        digest.update(name.encode())
+        digest.update((root / name).read_bytes().replace(b'\r\n', b'\n'))
+    packages = {}
+    for name in ('rapidocr-onnxruntime', 'onnxruntime', 'opencv-python', 'numpy'):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = 'unknown'
+    return {'codeRevision': digest.hexdigest()[:12], 'python': sys.version.split()[0], 'packages': packages,
+            'pipeline': 'geometry-anchors-v2-regions'}
+
+
+RUNTIME_IDENTITY = runtime_identity()
 
 # Initialize RapidOCR Engine
 try:
@@ -226,7 +249,7 @@ def clean_person_name(name):
     return cleaned.upper()
 
 def is_valid_name(candidate):
-    if not candidate or len(candidate) < 3:
+    if not candidate or len(candidate) < 3 or is_form_label(candidate):
         return False
     cand_s = candidate.strip()
     c_upper = cand_s.upper()
@@ -500,6 +523,7 @@ def process_document(doc_data):
         )
         ocr_ms = (perf_counter() - ocr_started) * 1000
     response["fileName"] = doc_data.get("fileName", "")
+    response['runtime'] = RUNTIME_IDENTITY
     response["timings"]["decodeMs"] = round(decode_ms, 2)
     response["timings"]["queueMs"] = round(queue_ms, 2)
     response["timings"]["ocrMs"] = round(ocr_ms, 2)
@@ -542,6 +566,7 @@ class TERAHandler(BaseHTTPRequestHandler):
                 "engine": "RapidOCR / PaddleOCR (ONNX Runtime)",
                 "pdfSupport": fitz_available,
                 "version": "3.0.0 (Geometry-Preserving Anchors)",
+                "runtime": RUNTIME_IDENTITY,
                                 "ocrAvailable": ocr_engine is not None
             }
             self._write_response(200, json.dumps(response, indent=2).encode('utf-8'))
@@ -566,7 +591,7 @@ class TERAHandler(BaseHTTPRequestHandler):
                 body = raw_body.decode('utf-8')
                 data = json.loads(body)
 
-                self.log_message("OCR #%s mulai.", request_id)
+                self.log_message("OCR #%s mulai (kode %s).", request_id, RUNTIME_IDENTITY['codeRevision'])
                 res = process_document(data)
                 timings = res.get("timings", {})
                 if timings:
