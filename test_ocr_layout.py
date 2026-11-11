@@ -151,6 +151,19 @@ class NameLayoutTests(unittest.TestCase):
         self.assertEqual(detail["status"], "review")
         self.assertIn("name_anchor_missing", detail["warnings"])
 
+    def test_raised_name_can_precede_a_separate_role_heading(self):
+        rows = [[box('SITI AMINAH', x=400, y=20, height=18)],
+                [box('ISTRI', x=40, y=35)],
+                [box('Nama lengkap', x=40, y=45, height=30),
+                 box('KOTA 12 MEI 1980', x=400, y=55)],
+                [box('2. Tempat dan tanggal lahir', y=80)]]
+        value, detail = self.extract(rows, role='istri')
+        self.assertEqual(value, 'SITI AMINAH')
+        self.assertEqual(detail['status'], 'review')
+        rows.insert(1, [box('CATATAN LAIN', x=40, y=30)])
+        value, _ = self.extract(rows, role='istri')
+        self.assertNotEqual(value, 'SITI AMINAH')
+
     def test_header_is_never_a_name_even_with_permissive_validator(self):
         for text in ("Pada hari ini", "bulan November tahun 2016 Masehi",
                      "telah dilangsungkan akad nikah", "tanggal Hijriyah"):

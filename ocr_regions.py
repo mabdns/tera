@@ -143,7 +143,7 @@ def header_date_candidate(image, rows, engine, extract_date):
                     # On a curved book, nearby printed field labels can provide
                     # local alignment that a straight month/year baseline lacks.
                     # Do not loosen the baseline test without that evidence.
-                    if abs(day["cy"] - projected) > 1.25 * min(day["h"], month["h"], year["h"]):
+                    if abs(day["cy"] - projected) > 3 * min(day["h"], month["h"], year["h"]):
                         continue
                     slot_labels = curved_day_slot(day, month, boxes)
                     if not slot_labels:
@@ -172,6 +172,46 @@ def recognize_regions(regions):
     if completed.returncode:
         raise RuntimeError("Pembacaan area Tesseract lokal gagal: " + completed.stderr.strip()[:300])
     return json.loads(completed.stdout)["results"]
+
+
+def number_region_candidate(image, rows, extract_number):
+    """Reread a detected four-part number; never repair glyphs by substitution."""
+    boxes = [b for row in rows for b in row]
+    labels = [b for b in boxes if re.search(r"nomor\s*akta", b.get("text", ""), re.I)]
+    if not labels:
+        return None
+    candidates = [b for b in boxes if re.fullmatch(
+        r"[\s.]*[0-9QO]{1,4}/\d{1,4}/[I1VX]+/(?:19|20)\d{2}[\s.]*", b.get("text", ""), re.I)
+        and any(b['cx'] > label['cx'] and abs(b['cy'] - label['cy']) <=
+                1.5 * max(b['h'], label['h']) for label in labels)]
+    if len(candidates) != 1:
+        return None
+    target = candidates[0]
+    crop = line_crop(image, [target["quad"]])
+    if crop is None:
+        return None
+    regions = []
+    cleaned = clean_form_dots(crop)
+    for index, variant in enumerate((crop, cleaned, cv2.resize(cleaned, None, fx=1.5, fy=1.5))):
+        ok, png = cv2.imencode('.png', variant)
+        if ok:
+            regions.append({"id": f"number_{index}", "kind": "number", "image":
+                            "data:image/png;base64," + base64.b64encode(png).decode('ascii')})
+    readings = recognize_regions(regions)
+    requested = {r['id'] for r in regions}
+    values = {r.get('id'): extract_number([r.get('text', '')]) for r in readings
+              if r.get('id') in requested and isinstance(r.get('text'), str)}
+    values = {key: value for key, value in values.items() if value}
+    if len(values) < 2 or len(set(values.values())) != 1:
+        return None
+    value = next(iter(values.values()))
+    warnings = ["verify_number_against_scan"]
+    if re.search(r'/\d{1,2}/(?:19|20)\d{2}$', value):
+        warnings.append('verify_numeric_month_against_roman_numeral')
+    return value, {"rawText": value, "status": "review", "page": 1,
+                   "source": "local-number-region", "warnings": warnings,
+                   "previousReading": target.get('text'), "regionReadings": readings,
+                   "boxes": [target['quad'].tolist()], "coordinateSpace": "normalized_page_pixels"}
 
 
 def refine_spouse_names(image, response, clean_name, valid_name):
@@ -219,20 +259,30 @@ def refine_spouse_names(image, response, clean_name, valid_name):
             continue
         detail = response["fieldDetails"][field]
         detail["regionReadings"] = candidates
-        votes = Counter(candidate["text"] for candidate in candidates)
-        value, count = votes.most_common(1)[0]
+        letter_key = lambda text: re.sub(r"[\s.,]", "", text.upper())
+        votes = Counter(letter_key(candidate["text"]) for candidate in candidates)
+        voted_key, count = votes.most_common(1)[0]
+        value = Counter(candidate["text"] for candidate in candidates
+                        if letter_key(candidate["text"]) == voted_key).most_common(1)[0][0]
         if count < 2:
             detail["status"] = "review"
             detail.setdefault("warnings", []).append("region_readings_disagree")
             continue
-        selected = [candidate for candidate in candidates if candidate["text"] == value]
+        selected = [candidate for candidate in candidates if letter_key(candidate["text"]) == voted_key]
         previous = response["data"][field]
         # Variants from one OCR engine are correlated, not independent votes.
         # When its minority candidate agrees with the primary engine's letters,
         # retain that cross-engine reading instead of replacing F with E merely
         # because two raster sizes repeat the same error. Preserve every raw
         # candidate and keep the result subject to review.
-        letter_key = lambda text: re.sub(r"[\s.,]", "", text.upper())
+        if (previous and letter_key(previous) != letter_key(value)
+                and detail.get("confidence", 0) >= 0.94
+                and not any(w in detail.get("warnings", []) for w in
+                            ("low_ocr_confidence", "word_boundaries_uncertain", "preprocessing_disagreement"))):
+            detail["alternativeText"] = value
+            detail["status"] = "review"
+            detail.setdefault("warnings", []).append("ocr_engine_disagreement_primary_retained")
+            continue
         shared = [candidate for candidate in candidates
                   if previous and letter_key(candidate["text"]) == letter_key(previous)]
         cross_engine_agreement = bool(shared and letter_key(value) != letter_key(previous))

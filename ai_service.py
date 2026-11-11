@@ -17,7 +17,7 @@ from threading import Lock
 from datetime import date
 from time import perf_counter
 from ocr_layout import extract_layout_document
-from ocr_regions import header_date_candidate, refine_spouse_names
+from ocr_regions import header_date_candidate, refine_spouse_names, number_region_candidate
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import cv2
@@ -496,6 +496,7 @@ def process_document(doc_data):
             images, ocr_engine, extract_no_akta, extract_tanggal_akad,
             clean_person_name, is_valid_name, split_joined_name,
             refine_header=header_date_candidate, refine_names=refine_spouse_names,
+            refine_number=number_region_candidate,
         )
         ocr_ms = (perf_counter() - ocr_started) * 1000
     response["fileName"] = doc_data.get("fileName", "")

@@ -276,14 +276,21 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
             previous = box
         raw = " ".join(p for p in pieces if p).strip(" :.-=")
         aligned_previous = False
-        if (not raw or HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or not valid_name(raw)) and index > 0:
+        if (not raw or HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or re.search(r'\d', raw) or not valid_name(raw)) and index > 0:
             # A sloped form can put the value slightly above its left-hand
             # label, creating two OCR rows. Accept only the immediately prior
             # row, to the right of the label, within the same vertical band.
             # A previous full line (or item-2 value below) is not a name source.
-            candidates = [b for b in rows[index - 1]
+            # A separate role heading can sit between the raised value and
+            # item-1 label on a curved page. Never cross an unrelated row.
+            prior_index = index - 1
+            if (ROLE.search(" ".join(b["text"] for b in rows[prior_index])) and prior_index > 0
+                    and not any(b["x0"] >= anchor["x1"] and valid_name(b["text"])
+                                for b in rows[prior_index])):
+                prior_index -= 1
+            candidates = [b for b in rows[prior_index]
                           if b["x0"] >= anchor["x1"]
-                          and abs(b["cy"] - anchor["cy"]) <= 1.25 * min(b["h"], anchor["h"])]
+                          and abs(b["cy"] - anchor["cy"]) <= (1.75 if prior_index < index - 1 else 1.25) * min(b["h"], anchor["h"])]
             if candidates:
                 prior_selected = [candidates[0]]
                 for candidate in candidates[1:]:
@@ -291,7 +298,7 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
                         break
                     prior_selected.append(candidate)
                 prior_raw = " ".join(b.get("text", "") for b in prior_selected).strip(" :.-=")
-                if valid_name(prior_raw) and not HEADER_WORDS.search(prior_raw) and not NEXT_ITEM.search(prior_raw):
+                if valid_name(prior_raw) and not HEADER_WORDS.search(prior_raw) and not NEXT_ITEM.search(prior_raw) and not ROLE.search(prior_raw):
                     raw, selected = prior_raw, prior_selected
                     aligned_previous = True
         if not raw and index + 1 < len(rows):
@@ -317,7 +324,7 @@ def name_from_rows(rows, expected_role, clean_name, valid_name):
             warnings.append("name_value_above_label_check_alignment")
         if role is None:
             warnings.append("role_anchor_missing")
-        if HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or not valid_name(raw):
+        if HEADER_WORDS.search(raw) or NEXT_ITEM.search(raw) or re.search(r'\d', raw) or not valid_name(raw):
             return "", {"rawText": raw, "status": "review",
                         "warnings": warnings + ["invalid_name_region"]}
         value = clean_name(raw)
@@ -352,7 +359,7 @@ def header_before_person(rows):
 
 def extract_layout_document(images, engine, extract_number, extract_date,
                             clean_name, valid_name, suggest_name,
-                            refine_header=None, refine_names=None):
+                            refine_header=None, refine_names=None, refine_number=None):
     started = perf_counter()
     data = {key: "" for key in ("noAkta", "tglAkad", "namaSuami", "namaIstri")}
     details = {}
@@ -391,6 +398,13 @@ def extract_layout_document(images, engine, extract_number, extract_date,
                         break
                 if data["noAkta"]:
                     break
+            if not data["noAkta"] and refine_number:
+                try:
+                    candidate = refine_number(reader.image, rows, extract_number)
+                    if candidate:
+                        data["noAkta"], details["noAkta"] = candidate
+                except Exception as error:
+                    warnings.append(f"Pembacaan ulang nomor gagal: {error}")
         else:
             spouse_image = reader.image
             left_rows = []

@@ -189,6 +189,13 @@ class HeaderDateRegionTests(unittest.TestCase):
         for missing in (3, 4):
             self.assertIsNone(self.detect([b for i, b in enumerate(items) if i != missing])[0])
 
+    def test_stronger_curvature_still_requires_local_slot_and_rejects_hijri_day(self):
+        items = [token('12', 100, 130), token('November', 220, 90), token('2016', 360, 90),
+                 token('tanggal', 50, 130, width=40), token('bulan', 160, 115, width=40)]
+        self.assertEqual(self.detect(items)[0][0], '12-11-2016')
+        self.assertIsNone(self.detect(items[:3])[0])
+        self.assertIsNone(self.detect(items + [token('Safar', 220, 130), token('1438', 360, 130)])[0])
+
     def test_curved_date_cannot_take_day_outside_slot_or_labels_on_another_line(self):
         for day_x, label_y in ((40, 108), (180, 108), (100, 145)):
             with self.subTest(day_x=day_x, label_y=label_y):
@@ -234,6 +241,22 @@ class HeaderDateRegionTests(unittest.TestCase):
 
 
 class SpouseNameRegionTests(unittest.TestCase):
+    def test_strong_primary_letters_are_retained_when_other_engine_disagrees(self):
+        self.response['fieldDetails']['namaSuami']['confidence'] = 0.95
+        self.refine([self.reading(i, 'BUDI BARU') for i in range(3)])
+        self.assertEqual(self.response['data']['namaSuami'], 'BUDI LAMA')
+        detail = self.response['fieldDetails']['namaSuami']
+        self.assertEqual(detail['alternativeText'], 'BUDI BARU')
+        self.assertEqual(len(detail['regionReadings']), 3)
+        self.assertEqual(detail['status'], 'review')
+
+    def test_votes_agree_on_letters_despite_title_spacing_and_dots(self):
+        self.refine([self.reading(0, 'BUDI BARU A. Md'),
+                     self.reading(1, 'BUDI BARU A MD'),
+                     self.reading(2, 'BUDI BARU A ND')])
+        self.assertEqual(self.response['data']['namaSuami'], 'BUDI BARU A. MD')
+        self.assertEqual(len(self.response['fieldDetails']['namaSuami']['regionReadings']), 3)
+
     def setUp(self):
         self.image = np.full((180, 500, 3), 255, dtype=np.uint8)
         cv2.putText(self.image, "BUDI", (32, 55), cv2.FONT_HERSHEY_SIMPLEX,
@@ -535,6 +558,27 @@ class RecognizeRegionsWrapperTests(unittest.TestCase):
                 regions.recognize_regions([])
         self.assertTrue(str(caught.exception).endswith("x" * 300))
         self.assertNotIn("x" * 301, str(caught.exception))
+
+
+class NumberRegionTests(unittest.TestCase):
+    def test_requires_label_and_two_distinct_raster_readings(self):
+        image = np.full((120, 500, 3), 255, np.uint8)
+        rows = [[box('Nomor Akta')], [box('Q025/025/1/2019', x=260, y=60)]]
+        extract = load_service_without_models().extract_no_akta
+        readings = [{'id': 'number_0', 'text': '0025/025/1/2019'},
+                    {'id': 'number_1', 'text': '0025/025/1/2019'}]
+        with patch.object(regions, 'recognize_regions', return_value=readings):
+            result = regions.number_region_candidate(image, rows, extract)
+        self.assertEqual(result[0], '0025/025/1/2019')
+        self.assertEqual(result[1]['status'], 'review')
+        for invalid in (readings[:1], [readings[0], dict(readings[1], text='0035/025/1/2019')],
+                        [readings[0], readings[0]]):
+            with patch.object(regions, 'recognize_regions', return_value=invalid):
+                self.assertIsNone(regions.number_region_candidate(image, rows, extract))
+        with patch.object(regions, 'recognize_regions') as recognize:
+            self.assertIsNone(regions.number_region_candidate(image, rows[1:], extract))
+            self.assertIsNone(regions.number_region_candidate(image, [[rows[0][0]], [box('Q025/025/1/2019', x=260, y=100)]], extract))
+        recognize.assert_not_called()
 
 
 if __name__ == "__main__":
