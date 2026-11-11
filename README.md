@@ -81,23 +81,36 @@ npm run build
 
 ### Menyamakan versi mesin OCR lokal di Windows
 
-Versi RapidOCR untuk pengujian scan TERA ditetapkan pada **1.4.4** di
-`requirements-ocr.txt`. Memperbarui kode dengan Git tidak memperbarui paket Python.
-Versi RapidOCR yang berbeda dapat menghasilkan pembacaan berbeda pada scan yang sama.
+Pengujian scan TERA menggunakan **Python 3.12 64-bit dan RapidOCR 1.4.4**.
+RapidOCR 1.4.4 mensyaratkan Python **di bawah 3.13**: paket ini tidak dapat
+langsung dipasang ke lingkungan Python 3.13. Memperbarui pip tidak mengubah batas tersebut.
+Memperbarui kode dengan Git juga tidak memperbarui paket Python.
+Versi inti RapidOCR, ONNX Runtime, OpenCV dan NumPy ditetapkan sesuai lingkungan
+pengujian untuk mengurangi perbedaan hasil antarinstalasi.
 
-1. Hentikan layanan AI lokal dengan **Ctrl+C**.
-2. Jalankan **perbarui_mesin_ocr.bat** dari folder proyek. Langkah ini membutuhkan internet.
-3. Pastikan proses selesai dan menampilkan `RapidOCR terpasang: 1.4.4`.
-4. Jalankan kembali **jalankan_ai_lokal.bat**. Terminal menampilkan lokasi Python dan versi RapidOCR.
-5. Di aplikasi, pilih dokumen lalu **Detail Akta → Pindai OCR** untuk menghasilkan pembacaan baru.
-   Hasil tersimpan tidak berubah hanya karena paket diperbarui.
+1. Pasang **Python 3.12 64-bit** berdampingan dengan Python yang sudah ada.
+   Installer resmi Windows tersedia di
+   [Python 3.12.10](https://www.python.org/downloads/release/python-31210/).
+   Aktifkan Python Launcher saat instalasi. Tutup dan buka kembali terminal, lalu
+   jalankan `py -3.12 --version` untuk memastikan versi terdeteksi.
+2. Hentikan layanan AI lokal dengan **Ctrl+C**.
+3. Jalankan **perbarui_mesin_ocr.bat** dari folder proyek. Skrip menyiapkan
+   `.venv-ocr312` memakai Python 3.12 64-bit dan memasang `requirements-ocr.txt`.
+   Langkah ini membutuhkan internet dan tidak menghapus `.venv` lama.
+4. Pastikan proses selesai dengan `RapidOCR terpasang: 1.4.4`.
+5. Jalankan **jalankan_ai_lokal.bat**. Peluncur mengutamakan `.venv-ocr312`, lalu
+   `.venv` lama, lalu `py`/`python` bila lingkungan lokal belum tersedia.
+   Terminal menampilkan lokasi Python, versi Python dan RapidOCR.
+6. Di aplikasi, pilih dokumen lalu **Detail Akta → Pindai OCR** untuk menghasilkan
+   pembacaan baru. Hasil tersimpan tidak berubah hanya karena paket diperbarui.
 
-Kedua skrip memilih `.venv\Scripts\python.exe` bila tersedia, lalu `py`, lalu
-`python`. Pembaruan menggunakan interpreter yang sama dengan peluncur layanan.
-Skrip berpindah ke foldernya sendiri sehingga lokasi terminal awal tidak mengubah
-pilihan lingkungan. Skrip tidak membuat lingkungan baru atau menghapus sesi koreksi.
-Pembaruan ini menyamakan RapidOCR; Python dan dependensi lain tetap perlu diperiksa
-melalui **Rincian dan saran → runtime** bila hasil masih berbeda.
+Jika Python 3.12 tidak ditemukan, skrip berhenti dengan petunjuk instalasi.
+Lingkungan `.venv-ocr312` yang sudah ada tetapi tidak kompatibel juga tidak
+ditimpa. Kedua skrip berpindah ke foldernya sendiri, sehingga lokasi terminal
+awal tidak mengubah pilihan lingkungan. Draf koreksi browser dan berkas sumber
+PDF/Excel tidak disentuh oleh pembaruan lingkungan Python.
+Dependensi lain tetap perlu diperiksa melalui **Rincian dan saran → runtime**
+bila hasil masih berbeda.
 
 ---
 

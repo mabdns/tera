@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 .venv/
+.venv-ocr312/
 __pycache__/
 *.pyc
 

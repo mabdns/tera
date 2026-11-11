@@ -1,2 +1,6 @@
-# RapidOCR version used for the real PDF regression tests.
+# Use Python 3.12 64-bit. RapidOCR 1.4.4 requires Python <3.13.
 rapidocr-onnxruntime==1.4.4
+onnxruntime==1.31.1
+opencv-python==4.14.0.94
+numpy==2.2.6
+PyMuPDF>=1.24,<2
