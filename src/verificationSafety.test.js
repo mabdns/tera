@@ -385,6 +385,7 @@ test('Excel upload retains manual book work and snapshots the actual new import'
   const h = setupMain({ docs: [makeDoc(0, { ...fields, ...metadata })] });
   await h.uploadPDF();
   const previous = h.api.state.records[0];
+  previous.fieldMapping = {schema:1,profileId:'model-a1',documentKey:'bound-to-original-pdf',fields:{}};
   h.api.recordManualChange(previous, 'book', 'namaSuami', 'MANUAL SUAMI');
   const beforeBook = plain(previous.book);
   const imported = { ...fields, namaSuami: 'EXCEL SUAMI', fileName: '1.pdf' };
@@ -392,6 +393,7 @@ test('Excel upload retains manual book work and snapshots the actual new import'
   const record = h.api.state.records[0];
   assert.deepEqual(plain(record.book), beforeBook);
   assert.equal(record.bookSources.namaSuami, 'manual');
+  assert.deepEqual(plain(record.fieldMapping), plain(previous.fieldMapping));
   assertIndependent(record, imported, imported);
   assert.equal(Object.isFrozen(record.originalEntry), true);
   h.api.recordManualChange(record, 'entry', 'namaSuami', 'CORRECTED ENTRY');

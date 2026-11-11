@@ -109,7 +109,8 @@ function serializeSessionState(sessionData) {
       legacySnapshot: r.legacySnapshot,
       requiresReverification: r.requiresReverification,
       pairingRequired: r.pairingRequired,
-      extraction: r.extraction
+      extraction: r.extraction,
+      fieldMapping: r.fieldMapping
     })),
     currentIndex: sessionData.currentIndex || 0,
     pdfFolderName: sessionData.pdfFolderName || '',
@@ -208,6 +209,7 @@ export async function savePDFFilesToDB(docs, folderName = '') {
           index: (typeof doc.index === 'number') ? doc.index : 0,
           num: (typeof doc.num === 'number' && !isNaN(doc.num)) ? doc.num : (doc.index + 1),
           fileName: doc.fileName,
+          folderPath: doc.folderPath || doc.fileName,
           folderName: folderName || doc.folderName || 'Folder PDF',
           fileSize: doc.fileSize || '',
           blob: blobToSave
@@ -266,6 +268,7 @@ export async function loadPDFFilesFromDB() {
             index: item.index,
             num: item.num,
             fileName: item.fileName,
+            folderPath: item.folderPath || item.fileName,
             folderName: item.folderName,
             fileSize: item.fileSize,
             file: item.blob, // Blob works as File in pdfjsLib.getDocument({ data: await blob.arrayBuffer() })

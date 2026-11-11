@@ -111,7 +111,9 @@ function makeSession() {
         extraction: { source: 'legacy-cache', warnings: ['Old audit evidence'] },
         statusVerifikasi: 'Valid', approval, changeHistory: [{ before: '', after: 'LEGACY BOOK' }]
       },
-      requiresReverification: false, pairingRequired: false, extraction
+      requiresReverification: false, pairingRequired: false, extraction,
+      fieldMapping: {schema:1,documentKey:'pdf-sha-bound',profileId:'model-a1',
+        fields:{noAkta:{page:1,x:.2,y:.1,w:.3,h:.1,confirmed:true}}}
     }],
     currentIndex: 0, pdfFolderName: '2020 - 1', spreadsheetFileName: 'reference.xlsx',
     spreadsheetLoaded: true, pdfLoaded: true
@@ -136,6 +138,7 @@ for (const backend of ['indexedDB', 'localStorage']) {
     session.records[0].book.namaSuami = 'UNSAVED';
     session.records[0].approval.book.namaSuami = 'UNSAVED APPROVAL';
     session.records[0].extraction.warnings.push('UNSAVED WARNING');
+    session.records[0].fieldMapping.fields.noAkta.x = .8;
     assert.deepEqual(saved.records, expected.records);
     const reloadedStorage = await freshStorage();
     const loaded = await reloadedStorage.loadSessionState();
@@ -159,6 +162,7 @@ for (const backend of ['indexedDB', 'localStorage']) {
     assert.deepEqual(secondReload.records[0].originalEntry, expected.records[0].originalEntry);
     assert.deepEqual(secondReload.records[0].legacySnapshot, expected.records[0].legacySnapshot);
     assert.deepEqual(secondReload.records[0].approval, expected.records[0].approval);
+    assert.deepEqual(secondReload.records[0].fieldMapping, expected.records[0].fieldMapping);
   });
 
   test(`${backend}: excludes runtime references recursively without discarding metadata`, async t => {

@@ -6,6 +6,7 @@
  */
 
 import './style.css';
+import { openFieldMapping } from './fieldMappingUI.js';
 import { evaluateRecord } from './validation.js';
 import { renderCertificateSVG } from './certificateRenderer.js';
 import { parseSpreadsheet, exportCorrectedExcel, exportArsipInventarisExcel } from './excelHelper.js';
@@ -1684,6 +1685,30 @@ async function handlePDFFolderUpload(files) {
 // Setup Event Handlers & Interactions
 // ============================================================
 function setupEvents() {
+  const mappingButton = document.getElementById('btn-field-mapping');
+  if (mappingButton) mappingButton.addEventListener('click', async () => {
+    const rec = getFilteredRecords()[state.currentIndex];
+    const doc = rec?.pdfDoc;
+    if (!doc) {
+      showNotification('Pemetaan bidang', 'Pilih dokumen yang sudah memiliki pasangan PDF.', 'warning');
+      return;
+    }
+    mappingButton.disabled = true;
+    try {
+      if (!doc.pageImages?.length) await renderPDFDocPage(doc.index);
+      if (!isCurrentDocument(rec, doc)) return;
+      await openFieldMapping({ doc, saved: rec.fieldMapping, onSave: mapping => {
+        if (!isCurrentDocument(rec, doc)) throw new Error('Dokumen berubah. Buka ulang pemetaan pada PDF yang dipilih.');
+        rec.fieldMapping = mapping;
+        invalidateApproval(rec, 'Pemetaan bidang diperbarui');
+        triggerAutoSave();
+        updateStats();
+        showNotification('Pemetaan tersimpan', 'Area disimpan untuk dokumen ini. Pembacaan tulisan tangan masih memerlukan tahap berikutnya.', 'info');
+      } });
+    } catch (e) {
+      showNotification('Pemetaan belum tersedia', e.message, 'warning');
+    } finally { mappingButton.disabled = false; }
+  });
   const viewport = document.getElementById('viewer-viewport');
 
   // Helper to scroll or pan document viewer vertically
@@ -2117,7 +2142,7 @@ function setupEvents() {
           rec.pairingRequired = !unique;
           if (previous) {
             Object.assign(rec, { book: { ...previous.book }, bookSources: { ...previous.bookSources },
-              extraction: previous.extraction, requiresReverification: previous.requiresReverification,
+              extraction: previous.extraction, fieldMapping: previous.fieldMapping, requiresReverification: previous.requiresReverification,
               legacySnapshot: previous.legacySnapshot, changeHistory: previous.changeHistory,
               approvalHistory: previous.approvalHistory, approval: previous.approval });
             retained.add(previous);

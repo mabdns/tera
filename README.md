@@ -26,6 +26,43 @@ npm run build
 
 Pengujian memakai OCR dan dokumen sintetis/simulasi; akurasi terhadap scan nyata masih perlu diuji dengan transkripsi acuan petugas.
 
+### Pemetaan bidang scan — tahap pertama
+
+Tombol **Pemetaan Bidang** di panel scan membuka editor untuk PDF yang sedang dipilih.
+Profil **Model A.1** menyiapkan usulan empat area pada satu bentangan buku lama;
+profil **Model N** menempatkan nomor akta di halaman depan dan tanggal/nama pada
+halaman mempelai. Pilihan profil dilakukan berdasarkan formulir, bukan tahun/nama file.
+Model N tidak tersedia pada PDF yang hanya memiliki satu halaman.
+
+1. Unggah PDF dan pilih dokumen, lalu klik **Pemetaan Bidang**.
+2. Pilih profil yang sesuai. Semua kotak awal berstatus belum diperiksa.
+3. Pilih salah satu dari empat bidang, lalu periksa label dan tulisan pada gambar.
+   Tarik pada gambar untuk menggambar ulang kotaknya, atau atur halaman dan
+   persentase kiri/atas/lebar/tinggi. Koordinat mengacu ke gambar asli, terpisah
+   dari zoom/rotasi penampil utama.
+4. Gunakan **Potongan bukti** untuk memastikan seluruh tulisan bidang tercakup,
+   tanpa nama orang tua, tanggal lahir, atau baris formulir lain. Untuk Model A.1,
+   tanggal akad berada pada bagian II; bagian I adalah tanggal pencatatan.
+5. Centang konfirmasi hanya setelah memeriksa area. Mengubah posisi, ukuran,
+   atau halaman membatalkan konfirmasi bidang tersebut. Simpan draf bila belum
+   selesai, atau periksa keempat bidang sebelum menyimpan pemetaan lengkap.
+6. Klik **Simpan Pemetaan Dokumen Ini**, lalu tunggu indikator **Tersimpan**.
+   **Batal/Tutup** membuang perubahan yang belum disimpan. Potongan gambar
+   terpilih dapat diunduh sebagai PNG untuk pemeriksaan.
+
+Pemetaan tersimpan bersama sesi lokal pada masing-masing record, terikat ke
+SHA-256 isi PDF serta nama folder/file asli. Penggantian PDF atau penggunaan
+nama `1.pdf` pada folder lain tidak otomatis menggunakan pemetaan lama.
+Sesi yang dipulihkan dan impor ulang Excel untuk PDF yang sama mempertahankan
+pemetaan. **Mulai dari Awal** tetap menghapus sesi, termasuk pemetaannya.
+
+Tahap ini hanya menyediakan pemetaan dan bukti gambar. Kotak awal adalah
+perkiraan geometris, **bukan deteksi label otomatis atau bukti akurasi OCR**.
+Editor tidak menjalankan OCR, mengganti nilai buku/Excel, atau menyetujui akta.
+Penyimpanan pemetaan membatalkan persetujuan akta sebelumnya. Jalur **Pindai OCR**
+dan **Ekstrak OCR** yang ada belum memakai kotak ini; pembacaan tulisan tangan
+serta integrasi crop ke mesin OCR/batch merupakan tahap berikutnya.
+
 ## ✨ Fitur Utama
 
 ### 1. Dual-Pane Side-by-Side Proofreader

@@ -2697,3 +2697,36 @@ body {
   gap: 0.85rem;
   box-shadow: 0 4px 12px rgba(16, 185, 129, 0.15);
 }
+
+/* Document-bound field mapping, independent of the transformed PDF viewer. */
+.field-map-dialog { width: min(1440px, 96vw); max-width: 96vw; max-height: 94vh; padding: 1.25rem; border: 1px solid #cbd5e1; border-radius: 16px; background: #fff; color: #172033; box-shadow: 0 24px 80px #0f172a55; overflow: auto; }
+.field-map-dialog::backdrop { background: #0f172aaa; }
+.field-map-header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
+.field-map-header h2 { margin: 0; font-size: 1.2rem; }
+.field-map-file { overflow-wrap: anywhere; margin: .35rem 0; color: #475569; }
+.field-map-notice { background: #fff7df; padding: .8rem; border: 1px solid #fbbf24; border-radius: 8px; font-size: .9rem; }
+.field-map-profile { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; font-weight: 600; }
+.field-map-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 1rem; }
+.field-map-image { min-width: 0; background: #f1f5f9; padding: .6rem; border-radius: 8px; }
+.field-map-image p { font-size: .85rem; color: #475569; margin: 0 0 .6rem; }
+.field-map-image canvas { width: 100%; height: auto; display: block; cursor: crosshair; touch-action: none; }
+.field-map-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+.field-map-fields button { white-space: normal; min-height: 44px; font-size: .85rem; }
+.field-map-fields [aria-pressed="true"] { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; }
+.field-map-editor p { font-size: .85rem; margin: .7rem 0; }
+.field-map-editor fieldset { border: 1px solid #cbd5e1; padding: .8rem; border-radius: 8px; }
+.field-map-editor label { display: block; font-size: .85rem; }
+.field-map-dialog select, .field-map-dialog input[type="number"] { font: inherit; padding: .4rem; border: 1px solid #94a3b8; border-radius: 6px; background: white; color: #172033; max-width: 100%; }
+.field-map-coordinates { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .6rem 0; }
+.field-map-coordinates input { display: block; width: 100%; box-sizing: border-box; }
+.field-map-confirm { line-height: 1.5; }
+.field-map-confirm input { width: 16px; height: 16px; vertical-align: middle; }
+.field-map-editor h3 { font-size: .9rem; margin: 1rem 0 .5rem; }
+.field-map-editor canvas { display: block; max-width: 100%; max-height: 180px; width: auto; height: auto; border: 1px solid #cbd5e1; margin-bottom: .5rem; }
+.field-map-status { min-height: 2.5em; font-size: .9rem; color: #334155; }
+.field-map-dialog footer { display: flex; justify-content: flex-end; gap: .6rem; flex-wrap: wrap; }
+@media (max-width: 850px) { .field-map-layout { grid-template-columns: 1fr; } .field-map-profile select { width: 100%; } }
+.field-map-dialog { margin: auto; }
+.field-map-dialog footer { position: sticky; bottom: -1.25rem; background: #fff; padding: .75rem 0 .25rem; box-shadow: 0 -8px 12px #ffffffed; }
+.subtoolbar-left { flex-wrap: wrap; }
+#btn-field-mapping { flex-shrink: 0; padding: .35rem .65rem; font-size: .78rem; }
